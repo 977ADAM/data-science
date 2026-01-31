@@ -24,7 +24,6 @@ def _make_ohe() -> OneHotEncoder:
     except TypeError:
         return OneHotEncoder(handle_unknown="ignore", sparse=False, dtype=np.float32)
 
-
 class AlignColumns(BaseEstimator, TransformerMixin):
     """
     Гарантирует стабильный набор входных колонок между train и inference.
@@ -95,6 +94,10 @@ class Cleaner(BaseEstimator, TransformerMixin):
             else:
                 self.categorical_cols_.append(col)
                 # простая стратегия для категорий: mode, иначе "unknown"
+                # важно: нормализуем строки УЖЕ на fit, иначе mode может стать "" / "nan" и т.п.
+                if pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s):
+                    s = s.astype(str).str.strip()
+                    s = s.replace({"": np.nan, "nan": np.nan, "none": np.nan, "null": np.nan})                
                 try:
                     mode = s.dropna().mode()
                     self.cat_fill_[col] = str(mode.iloc[0]) if len(mode) else "unknown"
@@ -224,7 +227,9 @@ class FeatureBuilder(BaseEstimator, TransformerMixin):
             df["is_month_to_month"] = 0
 
         if "PaymentMethod" in df.columns:
-            df["is_auto_pay"] = df["PaymentMethod"].astype(str).str.contains("automatic", case=False).astype(int)
+            df["is_month_to_month"] = (
+                df["Contract"].astype(str).str.strip().eq("Month-to-month")
+            ).astype(int)
         else:
             df["is_auto_pay"] = 0
 
@@ -289,7 +294,6 @@ class SklearnCatBoostClassifier(BaseEstimator, ClassifierMixin):
         if params:
             self.catboost_params.update(params)
         return self
-
 
 def make_pipeline(X_sample: pd.DataFrame) -> Pipeline:
     """
