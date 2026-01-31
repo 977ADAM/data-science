@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, ClassifierMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
@@ -127,7 +127,6 @@ class Cleaner(BaseEstimator, TransformerMixin):
 
         return df
 
-
 class FeatureBuilder(BaseEstimator, TransformerMixin):
     """
     Бизнес-фичи для churn/маркетинга.
@@ -150,9 +149,22 @@ class FeatureBuilder(BaseEstimator, TransformerMixin):
     def transform(self, X):
         df = X.copy()
 
-        tenure = pd.to_numeric(df.get("tenure", 0), errors="coerce").fillna(0)
-        total = pd.to_numeric(df.get("TotalCharges", 0.0), errors="coerce").fillna(0.0)
-        monthly = pd.to_numeric(df.get("MonthlyCharges", 0.0), errors="coerce").fillna(0.0)
+        # df.get(..., scalar) может вернуть скаляр, у которого нет .fillna().
+        # Делаем гарантированно Series нужной длины (важно для robustness на инференсе).
+        if "tenure" in df.columns:
+            tenure = pd.to_numeric(df["tenure"], errors="coerce").fillna(0)
+        else:
+            tenure = pd.Series(0, index=df.index, dtype="float64")
+
+        if "TotalCharges" in df.columns:
+            total = pd.to_numeric(df["TotalCharges"], errors="coerce").fillna(0.0)
+        else:
+            total = pd.Series(0.0, index=df.index, dtype="float64")
+
+        if "MonthlyCharges" in df.columns:
+            monthly = pd.to_numeric(df["MonthlyCharges"], errors="coerce").fillna(0.0)
+        else:
+            monthly = pd.Series(0.0, index=df.index, dtype="float64")
 
         # Денежные/поведенческие
         df["avg_monthly_bill"] = total / (tenure + 1)
@@ -195,7 +207,14 @@ class FeatureBuilder(BaseEstimator, TransformerMixin):
         num_services = 0
         for s in services:
             if s in df.columns:
-                num_services += (df[s] == "Yes").astype(int)
+                # Более устойчиво к "yes"/" Yes " и пр. вариациям на инференсе
+                num_services += (
+                    df[s]
+                    .astype(str)
+                    .str.strip()
+                    .str.lower()
+                    .eq("yes")
+                ).astype(int)
         df["num_services"] = num_services
 
         # Контракт/оплата
@@ -213,6 +232,63 @@ class FeatureBuilder(BaseEstimator, TransformerMixin):
         df["revenue_per_tenure"] = total / (tenure + 1)
 
         return df
+
+class SklearnCatBoostClassifier(BaseEstimator, ClassifierMixin):
+    """
+    sklearn-compatible wrapper around catboost.CatBoostClassifier.
+
+    Why: sklearn>=1.6 relies on sklearn BaseEstimator API (params/tags) in pipelines.
+    Native CatBoostClassifier may not implement sklearn tags API, which causes
+    AttributeError: object has no attribute '_sklearn_tags_' during predict_proba().
+    """
+    def __init__(self, **catboost_params):
+        self.catboost_params = dict(catboost_params)
+
+    def fit(self, X, y):
+        self.model_ = CatBoostClassifier(**self.catboost_params)
+        self.model_.fit(X, y)
+        return self
+
+    def predict(self, X):
+        return self.model_.predict(X)
+
+    def predict_proba(self, X):
+        return self.model_.predict_proba(X)
+
+    # sklearn uses this to decide if estimator is fitted in some contexts
+    def __sklearn_is_fitted__(self):
+        return hasattr(self, "model_")
+
+    def _more_tags(self):
+        # минимальные теги для совместимости со sklearn-пайплайнами/проверками
+        return {"requires_y": True}
+
+    # expose common attributes if somebody uses them downstream
+    @property
+    def feature_importances_(self):
+        return getattr(self.model_, "feature_importances_", None)
+
+    def get_params(self, deep=True):
+        """
+        Делает estimator sklearn-compatible:
+        - параметры доступны "плоско" (model__iterations, model__depth, ...)
+        - clone()/GridSearchCV работают ожидаемо
+        """
+        return dict(self.catboost_params)
+
+    def set_params(self, **params):
+        """
+        Поддержка обоих стилей:
+        - set_params(iterations=..., depth=...)
+        - set_params(catboost_params={...})  (на всякий случай)
+        """
+        if "catboost_params" in params:
+            cb = params.pop("catboost_params")
+            if cb is not None:
+                self.catboost_params = dict(cb)
+        if params:
+            self.catboost_params.update(params)
+        return self
 
 
 def make_pipeline(X_sample: pd.DataFrame) -> Pipeline:
@@ -243,7 +319,7 @@ def make_pipeline(X_sample: pd.DataFrame) -> Pipeline:
         remainder="drop",
     )
 
-    model = CatBoostClassifier(
+    model = SklearnCatBoostClassifier(
         iterations=600,
         depth=6,
         learning_rate=0.05,
