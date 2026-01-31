@@ -15,20 +15,18 @@ PIPELINE_PATH = MODEL_PATH
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pipe
     try:
-        pipe = joblib.load(str(PIPELINE_PATH))
+        app.state.pipe = joblib.load(str(PIPELINE_PATH))
     except Exception:
-        pipe = None
+        app.state.pipe = None
         logger.exception("Failed to load pipeline from %s", PIPELINE_PATH)
     yield
 
 app = FastAPI(title="Churn Prediction API", version="1.0.0", lifespan=lifespan)
 
-pipe = None
-
 @app.get("/health")
 def health():
+    pipe = getattr(app.state, "pipe", None)
     return {
         "status": "ok" if pipe is not None else "pipeline_not_loaded",
         "pipeline_path": str(PIPELINE_PATH),
@@ -38,6 +36,7 @@ def health():
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
+    pipe = getattr(app.state, "pipe", None)
     if pipe is None:
         logger.error("Pipeline is not loaded, cannot serve /predict")
         raise HTTPException(status_code=500, detail="Pipeline not loaded")
