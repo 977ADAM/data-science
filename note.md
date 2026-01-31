@@ -29,3 +29,46 @@ ROC-AUC, PR-AUC
 Где взять данные
 
 Kaggle → Telco Customer Churn
+
+
+# Customer Churn Prediction
+
+## Бизнес задача
+Снизить отток клиентов через таргетированный маркетинг
+
+## Стек
+CatBoost, FastAPI, Docker
+
+## Метрики
+ROC-AUC = 0.87
+
+## Запуск
+python run_training.py
+uvicorn app.main:app --reload
+
+
+Цель
+
+Понять что именно предсказываем и зачем.
+
+Сделать
+
+скачать Telco churn dataset с Kaggle
+
+описать бизнес-проблему в README:
+
+сколько стоит удержание?
+
+сколько приносит клиент?
+
+загрузка данных
+
+базовый EDA:
+
+shape
+
+пропуски
+
+типы
+
+churn rate
