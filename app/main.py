@@ -1,3 +1,5 @@
+# app/main.py
+
 import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException
@@ -5,6 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import logging
 import json
+import os
 
 from app.schemas import PredictRequest, PredictResponse
 from src.config import resolve_model_path
@@ -15,11 +18,12 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 PIPELINE_PATH = resolve_model_path()
 
-# Определяем директорию артефакта и manifest рядом с файлом модели.
-# - versioned: models/<MODEL_VERSION>/churn_pipeline.pkl  -> manifest рядом
-# - legacy:    models/churn_pipeline.pkl                  -> manifest может отсутствовать
+
 MODEL_DIR = PIPELINE_PATH.parent
-MANIFEST_PATH = MODEL_DIR / "manifest.json" if MODEL_DIR != PIPELINE_PATH.parent.parent else None
+# manifest лежит рядом с моделью, если это versioned-артефакт; для legacy его может не быть
+_candidate_manifest = MODEL_DIR / "manifest.json"
+MANIFEST_PATH = _candidate_manifest if _candidate_manifest.exists() else None
+REQUIRE_MANIFEST = os.getenv("REQUIRE_MANIFEST", "0").strip().lower() in ("1", "true", "yes", "y")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,6 +42,14 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Failed to load manifest from %s", MANIFEST_PATH)
         manifest = None
+
+    # Fail-closed режим для прода: если требуем manifest, а его нет — не поднимаем модель.
+    if pipe is not None and REQUIRE_MANIFEST and manifest is None:
+        logger.error(
+            "REQUIRE_MANIFEST enabled but manifest is missing. Refusing to serve predictions. path=%s",
+            PIPELINE_PATH,
+        )
+        pipe = None
 
     # Safety check: если есть manifest, проверяем целостность артефакта модели.
     # Несовпадение sha256 => не поднимаем модель (лучше fail-safe, чем тихий дрейф/подмена).

@@ -1,3 +1,5 @@
+# src/pipeline.py
+
 from __future__ import annotations
 
 import numpy as np
@@ -97,7 +99,10 @@ class Cleaner(BaseEstimator, TransformerMixin):
                 # важно: нормализуем строки УЖЕ на fit, иначе mode может стать "" / "nan" и т.п.
                 if pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s):
                     s = s.astype(str).str.strip()
-                    s = s.replace({"": np.nan, "nan": np.nan, "none": np.nan, "null": np.nan})                
+                    # аккуратно считаем "псевдо-NaN" без изменения регистра реальных категорий
+                    s_lower = s.str.lower()
+                    mask_na = s_lower.isin(["", "nan", "none", "null"])
+                    s = s.mask(mask_na, np.nan)               
                 try:
                     mode = s.dropna().mode()
                     self.cat_fill_[col] = str(mode.iloc[0]) if len(mode) else "unknown"
@@ -118,7 +123,9 @@ class Cleaner(BaseEstimator, TransformerMixin):
                 s = df[col]
                 if pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s):
                     s = s.astype(str).str.strip()
-                    s = s.replace({"": np.nan, "nan": np.nan, "none": np.nan, "null": np.nan})
+                    s_lower = s.str.lower()
+                    mask_na = s_lower.isin(["", "nan", "none", "null"])
+                    s = s.mask(mask_na, np.nan)
                     df[col] = s
 
         # применяем статистики с трейна
@@ -222,12 +229,14 @@ class FeatureBuilder(BaseEstimator, TransformerMixin):
 
         # Контракт/оплата
         if "Contract" in df.columns:
-            df["is_month_to_month"] = (df["Contract"] == "Month-to-month").astype(int)
+            contract = df["Contract"].astype(str).str.strip()
+            df["is_month_to_month"] = contract.eq("Month-to-month").astype(int)
         else:
             df["is_month_to_month"] = 0
 
         if "PaymentMethod" in df.columns:
-            df["is_auto_pay"] = df["PaymentMethod"].str.contains("automatic", case=False).astype(int)
+            pm = df["PaymentMethod"].fillna("").astype(str)
+            df["is_auto_pay"] = pm.str.contains("automatic", case=False, na=False).astype(int)
         else:
             df["is_auto_pay"] = 0
 
@@ -329,7 +338,10 @@ def make_pipeline(X_sample: pd.DataFrame) -> Pipeline:
         eval_metric="AUC",
         verbose=0,
         random_seed=42,
-        thread_count=-1,
+        # Для воспроизводимости (многопоток часто даёт недетерминизм).
+        # В проде для скорости можно обучать отдельно и фиксировать артефакт,
+        # но для гарантированного воспроизводимого обучения оставляем 1.
+        thread_count=1,
         allow_writing_files=False,
     )
 

@@ -1,6 +1,9 @@
+# src/config.py
+
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -23,6 +26,20 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "latest").strip()
 # Legacy path (backward compatibility)
 LEGACY_MODEL_PATH = ARTIFACTS_DIR / "churn_pipeline.pkl"
 
+_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+def _validate_model_version(v: str) -> str:
+    """
+    Защита от path traversal / неожиданных путей.
+    Разрешаем только безопасный "slug" (буквы/цифры/._-), длина <= 64.
+    """
+    v = (v or "").strip()
+    if v in ("", "latest"):
+        return "latest"
+    if not _VERSION_RE.match(v):
+        raise ValueError(f"Invalid MODEL_VERSION: {v!r}")
+    return v
+
 def resolve_model_dir(version: str | None = None) -> Path:
     """
     Определяет директорию артефакта модели.
@@ -32,7 +49,7 @@ def resolve_model_dir(version: str | None = None) -> Path:
       3) models/latest (symlink/dir)
       4) models/latest.txt (текстовый указатель)
     """
-    v = (version or MODEL_VERSION or "latest").strip()
+    v = _validate_model_version(version or MODEL_VERSION or "latest")
     if v and v != "latest":
         return ARTIFACTS_DIR / v
 
