@@ -8,13 +8,12 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, classification_report
 from sklearn.metrics import f1_score
-from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import LogisticRegression
 
 from src.data_loader import load_data
 from src.preprocessing import clean_data
 from src.pipeline import make_pipeline
 from src.drift import build_feature_frame, build_reference_profile
+from src.calibration import HoldoutCalibratedClassifier
 from src.config import (
     ARTIFACTS_DIR,
     RAW_DATA,
@@ -33,57 +32,160 @@ from src.versioning import (
     sha256_file,
 )
 
-class HoldoutCalibratedClassifier:
+def _expected_value(
+    p_churn: np.ndarray,
+    *,
+    ltv_saved: float,
+    cost_action: float,
+    retention_uplift: float = 1.0,
+) -> np.ndarray:
     """
-    Калибровка вероятностей на отдельном holdout без CV.
-    Нужна, чтобы не зависеть от classes_/cv-поведения CalibratedClassifierCV.
+    EV per customer:
+      EV = p_churn * LTV_saved * retention_uplift - Cost_action
+    retention_uplift: вероятность, что action действительно предотвращает churn (0..1).
     """
-    def __init__(self, estimator, method: str = "isotonic"):
-        self.estimator = estimator
-        self.method = method
-        self.calibrator_ = None
-        self.classes_ = np.array([0, 1], dtype=int)
+    p = np.asarray(p_churn, dtype=float)
+    p = np.clip(p, 0.0, 1.0)
+    ru = float(np.clip(retention_uplift, 0.0, 1.0))
+    return p * float(ltv_saved) * ru - float(cost_action)
 
-    def fit(self, X_cal, y_cal):
-        p = self.estimator.predict_proba(X_cal)[:, 1]
-        p = np.asarray(p, dtype=float)
-        p = np.clip(p, 1e-6, 1 - 1e-6)
+def _ev_at_k(
+    proba: np.ndarray,
+    *,
+    k: int,
+    ltv_saved: float,
+    cost_action: float,
+    retention_uplift: float = 1.0,
+) -> dict:
+    """
+    EV@K: ожидаемая выгода, если таргетировать TOP-K клиентов по p_churn.
+    """
+    p = np.asarray(proba, dtype=float)
+    p = p[np.isfinite(p)]
+    if p.size == 0:
+        return {"k": int(k), "ev_total": 0.0, "ev_per_customer": 0.0, "cutoff": None}
 
-        y_cal = np.asarray(y_cal, dtype=int)
+    k = int(max(0, min(int(k), int(p.size))))
+    if k == 0:
+        return {"k": 0, "ev_total": 0.0, "ev_per_customer": 0.0, "cutoff": None}
 
-        if self.method == "isotonic":
-            iso = IsotonicRegression(out_of_bounds="clip")
-            iso.fit(p, y_cal)
-            self.calibrator_ = ("isotonic", iso)
-        elif self.method == "sigmoid":
-            # Platt scaling: логит вероятности -> логрег
-            logit = np.log(p / (1.0 - p)).reshape(-1, 1)
-            lr = LogisticRegression(solver="lbfgs", max_iter=1000)
-            lr.fit(logit, y_cal)
-            self.calibrator_ = ("sigmoid", lr)
+    order = np.argsort(-p)  # desc
+    top_idx = order[:k]
+    top_p = p[top_idx]
+    ev = _expected_value(top_p, ltv_saved=ltv_saved, cost_action=cost_action, retention_uplift=retention_uplift)
+    ev_total = float(np.sum(ev))
+    cutoff = float(np.min(top_p))  # порог, который соответствует TOP-K
+    return {
+        "k": int(k),
+        "ev_total": ev_total,
+        "ev_per_customer": float(ev_total / k) if k else 0.0,
+        "cutoff": cutoff,
+    }
+
+def _find_optimal_cutoff_by_ev(
+    proba: np.ndarray,
+    *,
+    ltv_saved: float,
+    cost_action: float,
+    retention_uplift: float = 1.0,
+    grid: np.ndarray | None = None,
+) -> dict:
+    """
+    Выбираем порог не по F1, а по максимуму суммарного EV (на holdout).
+    Возвращает: best_threshold, best_ev_total, targeted_count, expected_uplift (== best_ev_total)
+    """
+    p = np.asarray(proba, dtype=float)
+    p = p[np.isfinite(p)]
+    if p.size == 0:
+        return {"best_threshold": 0.5, "best_ev_total": 0.0, "targeted_count": 0, "expected_uplift": 0.0}
+
+    if grid is None:
+        # достаточно плотная сетка, но без крайних 0/1
+        grid = np.linspace(0.01, 0.99, 99)
+
+    best_t = 0.5
+    best_ev = -float("inf")
+    best_cnt = 0
+
+    for t in grid:
+        mask = p >= float(t)
+        if not np.any(mask):
+            ev_total = 0.0
+            cnt = 0
         else:
-            raise ValueError(f"Unknown calibration method: {self.method}")
+            ev_total = float(
+                np.sum(
+                    _expected_value(
+                        p[mask],
+                        ltv_saved=ltv_saved,
+                        cost_action=cost_action,
+                        retention_uplift=retention_uplift,
+                    )
+                )
+            )
+            cnt = int(np.sum(mask))
+        if ev_total > best_ev:
+            best_ev = ev_total
+            best_t = float(t)
+            best_cnt = cnt
 
-        return self
+    return {
+        "best_threshold": float(best_t),
+        "best_ev_total": float(best_ev),
+        "targeted_count": int(best_cnt),
+        # baseline "do nothing" = 0, поэтому uplift == EV
+        "expected_uplift": float(best_ev),
+    }
 
-    def _calibrate_pos(self, p):
-        p = np.asarray(p, dtype=float)
-        p = np.clip(p, 1e-6, 1 - 1e-6)
-        name, cal = self.calibrator_
-        if name == "isotonic":
-            p_cal = cal.transform(p)
-        else:
-            logit = np.log(p / (1.0 - p)).reshape(-1, 1)
-            p_cal = cal.predict_proba(logit)[:, 1]
-        return np.clip(np.asarray(p_cal, dtype=float), 0.0, 1.0)
+def _simulate_retention_campaign(
+    y_true: np.ndarray,
+    proba: np.ndarray,
+    *,
+    k: int,
+    ltv_saved: float,
+    cost_action: float,
+    retention_uplift: float = 1.0,
+    n_sim: int = 200,
+    random_state: int = 42,
+) -> dict:
+    """
+    Симуляция retention-кампании (эмпирическая):
+    - таргетируем TOP-K по proba
+    - если клиент реально churn (y=1), то спасаем LTV с вероятностью retention_uplift
+    - если y=0, платим cost_action впустую
+    Возвращает распределение прибыли по симуляциям.
+    """
+    y = np.asarray(y_true, dtype=int)
+    p = np.asarray(proba, dtype=float)
+    ok = np.isfinite(p)
+    y = y[ok]
+    p = p[ok]
+    n = int(p.size)
+    if n == 0:
+        return {"k": int(k), "n": 0, "profit_mean": 0.0, "profit_std": 0.0}
 
-    def predict_proba(self, X):
-        p = self.estimator.predict_proba(X)[:, 1]
-        p_cal = self._calibrate_pos(p)
-        return np.column_stack([1.0 - p_cal, p_cal])
+    k = int(max(0, min(int(k), n)))
+    if k == 0:
+        return {"k": 0, "n": n, "profit_mean": 0.0, "profit_std": 0.0}
 
-    def predict(self, X):
-        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+    order = np.argsort(-p)
+    idx = order[:k]
+    yk = y[idx]
+
+    rng = np.random.default_rng(int(random_state))
+    ru = float(np.clip(retention_uplift, 0.0, 1.0))
+    profits = []
+    for _ in range(int(max(1, n_sim))):
+        saved = (yk == 1) & (rng.random(k) < ru)
+        profit = float(np.sum(saved) * float(ltv_saved) - k * float(cost_action))
+        profits.append(profit)
+    profits = np.asarray(profits, dtype=float)
+    return {
+        "k": int(k),
+        "n": int(n),
+        "profit_mean": float(np.mean(profits)),
+        "profit_std": float(np.std(profits, ddof=0)),
+    }
 
 def train_and_save():
     df = load_data()
@@ -115,19 +217,60 @@ def train_and_save():
     ).fit(X_test, y_test)
 
     proba = pipe.predict_proba(X_test)[:, 1]
-    preds = (proba >= THRESHOLD).astype(int)
+    # ---------------- Business / EV simulation ----------------
+    # Эти параметры можно вынести в config/env позже; сейчас задаём устойчивые дефолты.
+    LTV_SAVED = float(os.getenv("LTV_SAVED", "1000"))          # условная "спасённая" ценность клиента
+    COST_ACTION = float(os.getenv("COST_ACTION", "50"))        # стоимость звонка/скидки/оффера
+    RETENTION_UPLIFT = float(os.getenv("RETENTION_UPLIFT", "1.0"))  # эффективность удержания (0..1)
+
+    # optimal cutoff по max EV (на holdout)
+    opt = _find_optimal_cutoff_by_ev(
+        proba,
+        ltv_saved=LTV_SAVED,
+        cost_action=COST_ACTION,
+        retention_uplift=RETENTION_UPLIFT,
+    )
+    selected_threshold = float(opt["best_threshold"])
+    expected_uplift = float(opt["expected_uplift"])
+
+    preds = (proba >= selected_threshold).astype(int)
 
     print("ROC-AUC:", roc_auc_score(y_test, proba))
     print(classification_report(y_test, preds))
 
-    # Диагностика порога (боевой THRESHOLD не меняем)
-    grid = [i / 100 for i in range(1, 100)]
-    best_t, best_f1 = 0.5, -1.0
-    for t in grid:
-        f1 = f1_score(y_test, (proba >= t).astype(int))
-        if f1 > best_f1:
-            best_f1, best_t = f1, t
-    print(f"Best F1 threshold on holdout: {best_t:.2f} (F1={best_f1:.4f}); current THRESHOLD={THRESHOLD}")
+    # EV@K (ожидаемая) + симуляция (эмпирическая по y_test)
+    n_test = int(len(y_test))
+    k_grid = [
+        max(1, int(0.01 * n_test)),
+        max(1, int(0.05 * n_test)),
+        max(1, int(0.10 * n_test)),
+    ]
+    ev_at_k = [
+        _ev_at_k(proba, k=k, ltv_saved=LTV_SAVED, cost_action=COST_ACTION, retention_uplift=RETENTION_UPLIFT)
+        for k in k_grid
+    ]
+    sim_at_k = [
+        _simulate_retention_campaign(
+            y_test,
+            proba,
+            k=k,
+            ltv_saved=LTV_SAVED,
+            cost_action=COST_ACTION,
+            retention_uplift=RETENTION_UPLIFT,
+            n_sim=int(os.getenv("RETENTION_SIM_N", "200")),
+            random_state=RANDOM_STATE,
+        )
+        for k in k_grid
+    ]
+
+    print(
+        f"Selected threshold by max EV (holdout): {selected_threshold:.2f} "
+        f"| expected_uplift={expected_uplift:.2f} "
+        f"| targeted={int(opt['targeted_count'])}/{n_test}"
+    )
+    print(f"Business params: LTV_SAVED={LTV_SAVED}, COST_ACTION={COST_ACTION}, RETENTION_UPLIFT={RETENTION_UPLIFT}")
+    print("EV@K (expected):", ev_at_k)
+    print("Retention campaign simulation (profit):", sim_at_k)
 
     # --------- Drift reference snapshot (train distributions) ---------
     # Build feature-frame after align/clean/feat (categoricals preserved).
@@ -213,7 +356,19 @@ def train_and_save():
         "target": TARGET,
         "random_state": RANDOM_STATE,
         "test_size": TEST_SIZE,
-        "threshold": THRESHOLD,
+        # legacy config threshold (не используется для решения, но полезно хранить)
+        "threshold_config": THRESHOLD,
+        # выбранный порог по max EV
+        "selected_threshold": selected_threshold,
+        # expected uplift (baseline=0, uplift==EV)
+        "expected_uplift": expected_uplift,
+        # бизнес-параметры EV/симуляции (для воспроизводимости)
+        "ltv_saved": LTV_SAVED,
+        "cost_action": COST_ACTION,
+        "retention_uplift": RETENTION_UPLIFT,
+        # бизнес-метрики на holdout
+        "ev_at_k": ev_at_k,
+        "retention_simulation_at_k": sim_at_k,
         "train_size": int(len(X_train)),
         "test_size_rows": int(len(X_test)),
     }

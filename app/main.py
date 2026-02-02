@@ -8,11 +8,13 @@ from pathlib import Path
 import logging
 import json
 import os
+import sys
 
 from app.schemas import PredictRequest, PredictResponse, DriftRequest, DriftResponse
 from src.config import resolve_model_path
 from src.versioning import sha256_file
 from src.drift import build_feature_frame, compare_to_reference
+from src.calibration import HoldoutCalibratedClassifier
 import numpy as np
 import math
 
@@ -75,6 +77,23 @@ REQUIRE_MANIFEST = os.getenv("REQUIRE_MANIFEST", "0").strip().lower() in ("1", "
 async def lifespan(app: FastAPI):
     pipe = None
     try:
+        # ---------------------------------------------------------------------
+        # Backward-compat for old pickles that were created when the class
+        # was defined under multiprocessing main module name "__mp_main__".
+        #
+        # When unpickling, Python does:
+        #   sys.modules["__mp_main__"].HoldoutCalibratedClassifier
+        # In uvicorn, "__mp_main__" points to uvicorn module => AttributeError.
+        # We inject the symbol so old artifacts load.
+        # Future artifacts will be stable because the class now lives in src.calibration.
+        # ---------------------------------------------------------------------
+        mp_main = sys.modules.get("__mp_main__")
+        if mp_main is not None and not hasattr(mp_main, "HoldoutCalibratedClassifier"):
+            setattr(mp_main, "HoldoutCalibratedClassifier", HoldoutCalibratedClassifier)
+        main_mod = sys.modules.get("__main__")
+        if main_mod is not None and not hasattr(main_mod, "HoldoutCalibratedClassifier"):
+            setattr(main_mod, "HoldoutCalibratedClassifier", HoldoutCalibratedClassifier)
+
         pipe = joblib.load(str(PIPELINE_PATH))
     except Exception:
         logger.exception("Failed to load pipeline from %s", PIPELINE_PATH)
