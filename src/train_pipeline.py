@@ -4,10 +4,8 @@ import joblib
 import os
 from pathlib import Path
 import numpy as np
-import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, classification_report
-from sklearn.metrics import f1_score
 
 from src.data_loader import load_data
 from src.preprocessing import clean_data
