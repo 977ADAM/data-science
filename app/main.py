@@ -14,6 +14,50 @@ from src.config import resolve_model_path
 from src.versioning import sha256_file
 from src.drift import build_feature_frame, compare_to_reference
 import numpy as np
+import math
+
+def _ks_stat_and_pvalue(x: np.ndarray, y: np.ndarray) -> tuple[float | None, float | None]:
+    """Two-sample KS test with asymptotic p-value approximation (no scipy dependency)."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    x = x[np.isfinite(x)]
+    y = y[np.isfinite(y)]
+    n1 = x.size
+    n2 = y.size
+    if n1 < 2 or n2 < 2:
+        return None, None
+
+    x_sort = np.sort(x)
+    y_sort = np.sort(y)
+    data_all = np.sort(np.unique(np.concatenate([x_sort, y_sort])))
+    cdf1 = np.searchsorted(x_sort, data_all, side="right") / n1
+    cdf2 = np.searchsorted(y_sort, data_all, side="right") / n2
+    d = float(np.max(np.abs(cdf1 - cdf2)))
+
+    # Asymptotic p-value approximation via Kolmogorov distribution.
+    en = math.sqrt(n1 * n2 / (n1 + n2))
+    lam = (en + 0.12 + 0.11 / en) * d
+    s = 0.0
+    for j in range(1, 101):
+        term = (-1) ** (j - 1) * math.exp(-2.0 * (j * lam) ** 2)
+        s += term
+        if abs(term) < 1e-10:
+            break
+    p = max(0.0, min(1.0, 2.0 * s))
+    return d, p
+
+
+def _psi(ref_p: np.ndarray, cur_p: np.ndarray, eps: float = 1e-6) -> float | None:
+    ref_p = np.asarray(ref_p, dtype=float)
+    cur_p = np.asarray(cur_p, dtype=float)
+    if ref_p.size == 0 or cur_p.size == 0 or ref_p.size != cur_p.size:
+        return None
+    ref_p = np.clip(ref_p, eps, 1.0)
+    cur_p = np.clip(cur_p, eps, 1.0)
+    ref_p = ref_p / ref_p.sum()
+    cur_p = cur_p / cur_p.sum()
+    return float(np.sum((cur_p - ref_p) * np.log(cur_p / ref_p)))
+
 
 logger = logging.getLogger(__name__)
 
@@ -151,27 +195,39 @@ def drift(req: DriftRequest):
         proba = np.asarray(proba, dtype=float)
         proba = proba[np.isfinite(proba)]
         if proba.size:
-            # PSI based on reference edges (quantile bins)
+            # PSI/KS based on reference edges (quantile bins) + (optional) ref_bin_probs.
+            psi = None
+            ks_stat = None
+            ks_pvalue = None
+
             ref_edges = pred_ref.get("edges")
+            ref_bin_probs = pred_ref.get("ref_bin_probs")
             if ref_edges and isinstance(ref_edges, list) and len(ref_edges) >= 3:
                 edges = np.asarray(ref_edges, dtype=float)
                 edges = np.unique(edges)
                 if edges.size >= 3:
-                    # compute ref bin probs from edges assuming quantile bins ~ uniform
-                    # (we didn't store ref probs for prediction; bins are quantiles -> approx uniform)
-                    ref_probs = np.ones(edges.size - 1, dtype=float) / float(edges.size - 1)
                     # current bin probs
                     idx = np.digitize(proba, edges[1:-1], right=False)
                     counts = np.bincount(idx, minlength=edges.size - 1).astype(float)
-                    cur_probs = counts / counts.sum() if counts.sum() > 0 else counts
-                    eps = 1e-6
-                    ref_p = np.clip(ref_probs, eps, 1.0); ref_p = ref_p / ref_p.sum()
-                    cur_p = np.clip(cur_probs, eps, 1.0); cur_p = cur_p / cur_p.sum()
-                    psi = float(np.sum((cur_p - ref_p) * np.log(cur_p / ref_p)))
-                else:
-                    psi = None
-            else:
-                psi = None
+                    cur_probs = counts / counts.sum() if counts.sum() > 0 else np.zeros(edges.size - 1, dtype=float)
+
+                    # prefer stored ref_bin_probs; fallback to uniform (quantile bins).
+                    if ref_bin_probs and isinstance(ref_bin_probs, list) and len(ref_bin_probs) == int(edges.size - 1):
+                        ref_probs = np.asarray(ref_bin_probs, dtype=float)
+                    else:
+                        ref_probs = np.ones(edges.size - 1, dtype=float) / float(edges.size - 1)
+
+                    psi = _psi(ref_probs, cur_probs)
+
+                    # KS: approximate reference distribution from bins (midpoints + ref_probs)
+                    try:
+                        mids = (edges[:-1] + edges[1:]) / 2.0
+                        if mids.size == ref_probs.size and ref_probs.sum() > 0:
+                            n_syn = int(min(5000, max(200, proba.size * 2)))
+                            syn = np.random.default_rng(42).choice(mids, size=n_syn, p=ref_probs / ref_probs.sum())
+                            ks_stat, ks_pvalue = _ks_stat_and_pvalue(syn, proba)
+                    except Exception:
+                        ks_stat, ks_pvalue = None, None
 
             pred_metrics = {
                 "rows": int(proba.size),
@@ -180,6 +236,8 @@ def drift(req: DriftRequest):
                 "cur_mean": float(np.mean(proba)),
                 "cur_std": float(np.std(proba, ddof=0)),
                 "psi": psi,
+                "ks_stat": ks_stat,
+                "ks_pvalue": ks_pvalue,
             }
         else:
             pred_metrics = {"rows": 0, "psi": None}

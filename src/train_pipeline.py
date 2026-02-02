@@ -42,22 +42,6 @@ def train_and_save():
     # X raw (важно: оставляем сырые категориальные!)
     X = df.drop(columns=[TARGET])
 
-    # --------- Data profile (quality snapshot) ---------
-    # This is intentionally lightweight but very useful for debugging / drift detection.
-    # Keep it stable across runs (sort keys; basic python types).
-    missing_rate = (df.isna().mean()).to_dict()
-    data_profile = {
-        "rows": int(len(df)),
-        "columns": list(df.columns),
-        "target_rate": float(y.mean()) if len(y) else None,
-        "missing_rate": {str(k): float(v) for k, v in missing_rate.items()},
-        "drift_reference": {
-            "features": ref_feature_profile,
-            "prediction_proba": pred_ref,
-        },
-    }
-
-
     X_train, X_test, y_train, y_test = train_test_split(
         X, y,
         test_size=TEST_SIZE,
@@ -113,16 +97,43 @@ def train_and_save():
             edges = np.quantile(proba_ref, qs)
             edges = np.unique(edges)
             # keep mean/std + edges (binning in API)
-            pred_ref = {
-                "mean": float(np.mean(proba_ref)),
-                "std": float(np.std(proba_ref, ddof=0)),
-                "edges": [float(x) for x in edges.tolist()] if edges.size >= 3 else None,
-            }
+            if edges.size >= 3:
+                # ref bin probs (for PSI/KS in API)
+                idx = np.digitize(proba_ref, edges[1:-1], right=False)
+                counts = np.bincount(idx, minlength=edges.size - 1).astype(float)
+                probs = counts / counts.sum() if counts.sum() > 0 else np.zeros(edges.size - 1, dtype=float)
+                pred_ref = {
+                    "mean": float(np.mean(proba_ref)),
+                    "std": float(np.std(proba_ref, ddof=0)),
+                    "edges": [float(x) for x in edges.tolist()],
+                    "ref_bin_probs": [float(x) for x in probs.tolist()],
+                }
+            else:
+                pred_ref = {
+                    "mean": float(np.mean(proba_ref)),
+                    "std": float(np.std(proba_ref, ddof=0)),
+                    "edges": None,
+                    "ref_bin_probs": None,
+                }
         else:
-            pred_ref = {"mean": None, "std": None, "edges": None}
+            pred_ref = {"mean": None, "std": None, "edges": None, "ref_bin_probs": None}
     except Exception:
         pred_ref = {"error": "failed_to_build_prediction_reference"}
 
+    # --------- Data profile (quality snapshot) ---------
+    # This is intentionally lightweight but very useful for debugging / drift detection.
+    # Keep it stable across runs (sort keys; basic python types).
+    missing_rate = (df.isna().mean()).to_dict()
+    data_profile = {
+        "rows": int(len(df)),
+        "columns": list(df.columns),
+        "target_rate": float(y.mean()) if len(y) else None,
+        "missing_rate": {str(k): float(v) for k, v in missing_rate.items()},
+        "drift_reference": {
+            "features": ref_feature_profile,
+            "prediction_proba": pred_ref,
+        },
+    }
 
     # --------- Versioned artifacts ---------
     repo_root = Path(__file__).resolve().parents[1]

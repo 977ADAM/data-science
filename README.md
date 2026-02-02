@@ -76,7 +76,17 @@ ML-сервис для прогнозирования вероятности о�
 ### Установка
 ```bash
 pip install -r requirements.txt
+```
+ 
+### Обучение модели
+```bash
+python -m src.train_pipeline
+```
 
+### Запуск API
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8080
+```
 
 ---
 
