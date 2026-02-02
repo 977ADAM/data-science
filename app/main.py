@@ -10,13 +10,22 @@ import json
 import os
 import sys
 
-from app.schemas import PredictRequest, PredictResponse, DriftRequest, DriftResponse
-from src.config import resolve_model_path
+from app.schemas import (
+    PredictRequest,
+    PredictResponse,
+    DriftRequest,
+    DriftResponse,
+    UpliftRequest,
+    UpliftResponse,
+)
+from src.config import resolve_model_path, resolve_uplift_model_path
 from src.versioning import sha256_file
 from src.drift import build_feature_frame, compare_to_reference
 from src.calibration import HoldoutCalibratedClassifier
 import numpy as np
 import math
+from fastapi.responses import Response
+from threading import Lock
 
 def _ks_stat_and_pvalue(x: np.ndarray, y: np.ndarray) -> tuple[float | None, float | None]:
     """Two-sample KS test with asymptotic p-value approximation (no scipy dependency)."""
@@ -66,6 +75,45 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 PIPELINE_PATH = resolve_model_path()
 
+UPLIFT_PIPELINE_PATH = resolve_uplift_model_path()
+
+PSI_WARNING = 0.2
+PSI_CRITICAL = 0.3
+
+_metrics_lock = Lock()
+
+def _init_metrics_state(app: FastAPI) -> None:
+    """
+    In-memory metrics state.
+    Notes:
+    - This is process-local (resets on restart, not shared across replicas).
+    - Good enough for demo / local monitoring; for prod consider Prometheus client multiprocess or external aggregation.
+    """
+    app.state.metrics = {
+        "proba_sum": 0.0,
+        "proba_count": 0,
+        # last drift snapshot
+        "psi_max": None,
+        "unseen_pct": None,
+        "psi_status": "ok",  # ok|warning|critical
+    }
+
+def _psi_status(psi_max: float | None) -> str:
+    if psi_max is None:
+        return "ok"
+    if psi_max > PSI_CRITICAL:
+        return "critical"
+    if psi_max > PSI_WARNING:
+        return "warning"
+    return "ok"
+
+def _format_prom_metric(name: str, value: float | int, labels: dict[str, str] | None = None) -> str:
+    if labels:
+        # stable ordering for readability
+        items = ",".join([f'{k}="{str(v)}"' for k, v in sorted(labels.items())])
+        return f"{name}{{{items}}} {value}\n"
+    return f"{name} {value}\n"
+
 
 MODEL_DIR = PIPELINE_PATH.parent
 # manifest лежит рядом с моделью, если это versioned-артефакт; для legacy его может не быть
@@ -75,7 +123,9 @@ REQUIRE_MANIFEST = os.getenv("REQUIRE_MANIFEST", "0").strip().lower() in ("1", "
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _init_metrics_state(app)
     pipe = None
+    uplift_pipe = None
     try:
         # ---------------------------------------------------------------------
         # Backward-compat for old pickles that were created when the class
@@ -98,6 +148,15 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Failed to load pipeline from %s", PIPELINE_PATH)
         pipe = None
+
+
+    # Optional: uplift T-learner (two-model). Not required for churn /predict.
+    try:
+        if UPLIFT_PIPELINE_PATH.exists():
+            uplift_pipe = joblib.load(str(UPLIFT_PIPELINE_PATH))
+    except Exception:
+        logger.exception("Failed to load uplift model from %s", UPLIFT_PIPELINE_PATH)
+        uplift_pipe = None
 
     # manifest optional (но очень желателен)
     manifest = None
@@ -134,6 +193,7 @@ async def lifespan(app: FastAPI):
             pipe = None
 
     app.state.pipe = pipe
+    app.state.uplift_pipe = uplift_pipe
     app.state.manifest = manifest
     yield
 
@@ -142,17 +202,50 @@ app = FastAPI(title="Churn Prediction API", version="1.0.0", lifespan=lifespan)
 @app.get("/health")
 def health():
     pipe = getattr(app.state, "pipe", None)
+    uplift_pipe = getattr(app.state, "uplift_pipe", None)
     manifest = getattr(app.state, "manifest", None)
     return {
         "status": "ok" if pipe is not None else "pipeline_not_loaded",
         "pipeline_path": str(PIPELINE_PATH),
+        "uplift_pipeline_path": str(UPLIFT_PIPELINE_PATH),
         "artifact_dir": str(MODEL_DIR),
         "pipeline_loaded": pipe is not None,
+        "uplift_pipeline_loaded": uplift_pipe is not None,
         "manifest_loaded": manifest is not None,
         "model_version": (manifest or {}).get("model_version"),
         "data_sha256": ((manifest or {}).get("data") or {}).get("raw_data_sha256"),
         "code_sha256": ((manifest or {}).get("code") or {}).get("code_sha256"),
     }
+
+
+
+@app.post("/uplift", response_model=UpliftResponse)
+def uplift(req: UpliftRequest):
+    """
+    Two-model uplift (T-learner) scoring.
+
+    Returns:
+      - p_treated  = P(Y=1|X, do(treat=1))
+      - p_control  = P(Y=1|X, do(treat=0))
+      - uplift     = p_treated - p_control
+    """
+    uplift_pipe = getattr(app.state, "uplift_pipe", None)
+    if uplift_pipe is None:
+        raise HTTPException(status_code=500, detail="Uplift model not loaded")
+
+    customer_obj = req.customer
+    payload = customer_obj.model_dump() if hasattr(customer_obj, "model_dump") else customer_obj.dict()
+    df = pd.DataFrame([payload])
+
+    try:
+        p_t = float(uplift_pipe.predict_proba_treated(df).reshape(-1)[0])
+        p_c = float(uplift_pipe.predict_proba_control(df).reshape(-1)[0])
+        u = float(p_t - p_c)
+    except Exception:
+        logger.exception("Failed to compute uplift")
+        raise HTTPException(status_code=500, detail="Failed to compute uplift")
+
+    return UpliftResponse(p_treated=p_t, p_control=p_c, uplift=u)
 
 
 @app.post("/predict", response_model=PredictResponse)
@@ -168,6 +261,19 @@ def predict(req: PredictRequest):
     # строго один клиент
     df = pd.DataFrame([payload])
     proba = float(pipe.predict_proba(df)[:, 1].item())
+
+    # update in-memory avg proba
+    try:
+        if math.isfinite(proba):
+            with _metrics_lock:
+                m = getattr(app.state, "metrics", None)
+                if m is not None:
+                    m["proba_sum"] = float(m.get("proba_sum", 0.0)) + float(proba)
+                    m["proba_count"] = int(m.get("proba_count", 0)) + 1
+    except Exception:
+        # metrics must never break prediction endpoint
+        pass
+
     return PredictResponse(churn_probability=proba)
 
 
@@ -268,4 +374,85 @@ def drift(req: DriftRequest):
         "prediction_drift": pred_metrics,
         "model_version": (manifest or {}).get("model_version"),
     }
+
+    # update /metrics snapshot: psi_max + unseen%
+    try:
+        psi_vals = []
+        unseen_vals = []
+
+        # numeric psi
+        for _, v in (drift_metrics.get("numeric") or {}).items():
+            psi = v.get("psi") if isinstance(v, dict) else None
+            if psi is not None and isinstance(psi, (int, float)) and math.isfinite(float(psi)):
+                psi_vals.append(float(psi))
+
+        # categorical psi + unseen_mass
+        for _, v in (drift_metrics.get("categorical") or {}).items():
+            if not isinstance(v, dict):
+                continue
+            psi = v.get("psi")
+            if psi is not None and isinstance(psi, (int, float)) and math.isfinite(float(psi)):
+                psi_vals.append(float(psi))
+            um = v.get("unseen_mass")
+            if um is not None and isinstance(um, (int, float)) and math.isfinite(float(um)):
+                unseen_vals.append(float(um))
+
+        psi_max = max(psi_vals) if psi_vals else None
+        unseen_pct = (max(unseen_vals) * 100.0) if unseen_vals else None
+
+        with _metrics_lock:
+            m = getattr(app.state, "metrics", None)
+            if m is not None:
+                m["psi_max"] = psi_max
+                m["unseen_pct"] = unseen_pct
+                m["psi_status"] = _psi_status(psi_max)
+    except Exception:
+        pass
+
     return DriftResponse(drift=out)
+
+
+
+@app.get("/metrics")
+def metrics():
+    """
+    Prometheus-friendly text exposition.
+    Exposes:
+      - churn_avg_proba
+      - churn_psi_max (last /drift snapshot)
+      - churn_unseen_categories_pct (last /drift snapshot, max over categorical features)
+      - churn_psi_status{status="ok|warning|critical"} (one-hot)
+    Thresholds:
+      PSI > 0.2 -> warning
+      PSI > 0.3 -> critical
+    """
+    with _metrics_lock:
+        m = getattr(app.state, "metrics", None) or {}
+        proba_sum = float(m.get("proba_sum", 0.0))
+        proba_count = int(m.get("proba_count", 0))
+        avg_proba = (proba_sum / proba_count) if proba_count > 0 else float("nan")
+        psi_max = m.get("psi_max", None)
+        unseen_pct = m.get("unseen_pct", None)
+        status = str(m.get("psi_status", "ok"))
+
+    lines = []
+    # help/type (nice to have)
+    lines.append("# HELP churn_avg_proba Average predicted churn probability since process start.\n")
+    lines.append("# TYPE churn_avg_proba gauge\n")
+    lines.append(_format_prom_metric("churn_avg_proba", avg_proba))
+
+    lines.append("# HELP churn_psi_max Max PSI over features from the last /drift call.\n")
+    lines.append("# TYPE churn_psi_max gauge\n")
+    lines.append(_format_prom_metric("churn_psi_max", float(psi_max) if psi_max is not None else float("nan")))
+
+    lines.append("# HELP churn_unseen_categories_pct Max share (%%) of unseen categories from the last /drift call.\n")
+    lines.append("# TYPE churn_unseen_categories_pct gauge\n")
+    lines.append(_format_prom_metric("churn_unseen_categories_pct", float(unseen_pct) if unseen_pct is not None else float("nan")))
+
+    lines.append("# HELP churn_psi_status PSI status derived from churn_psi_max thresholds (ok/warning/critical).\n")
+    lines.append("# TYPE churn_psi_status gauge\n")
+    for s in ("ok", "warning", "critical"):
+        lines.append(_format_prom_metric("churn_psi_status", 1 if status == s else 0, labels={"status": s}))
+
+    body = "".join(lines)
+    return Response(content=body, media_type="text/plain; version=0.0.4")

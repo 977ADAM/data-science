@@ -43,3 +43,13 @@ class DriftRequest(BaseModel):
 class DriftResponse(BaseModel):
     # структура свободная (metrics per feature + prediction drift)
     drift: dict
+
+
+class UpliftRequest(BaseModel):
+    customer: Customer
+
+
+class UpliftResponse(BaseModel):
+    p_treated: float
+    p_control: float
+    uplift: float

@@ -26,6 +26,10 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "latest").strip()
 # Legacy path (backward compatibility)
 LEGACY_MODEL_PATH = ARTIFACTS_DIR / "churn_pipeline.pkl"
 
+# Optional uplift model artifact name (two-model T-learner)
+UPLIFT_MODEL_FILENAME = "uplift_tlearner.pkl"
+
+
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 def _validate_model_version(v: str) -> str:
@@ -85,6 +89,16 @@ def resolve_model_path(version: str | None = None) -> Path:
     if LEGACY_MODEL_PATH.exists():
         return LEGACY_MODEL_PATH
     return candidate
+
+
+
+def resolve_uplift_model_path(version: str | None = None) -> Path:
+    """
+    Возвращает путь до uplift T-learner артефакта.
+    По умолчанию ищет в versioned директории рядом с churn_pipeline.pkl.
+    """
+    d = resolve_model_dir(version)
+    return d / UPLIFT_MODEL_FILENAME
 
 TARGET = "Churn"
 RANDOM_STATE = 42
