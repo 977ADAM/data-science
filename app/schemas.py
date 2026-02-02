@@ -1,6 +1,7 @@
 # app/schemas.py
 
 from typing import Optional, Union
+from typing import List
 from pydantic import BaseModel, Field
 
 class Customer(BaseModel):
@@ -33,3 +34,12 @@ class PredictRequest(BaseModel):
 
 class PredictResponse(BaseModel):
     churn_probability: float
+
+
+class DriftRequest(BaseModel):
+    customers: List[Customer]
+
+
+class DriftResponse(BaseModel):
+    # структура свободная (metrics per feature + prediction drift)
+    drift: dict

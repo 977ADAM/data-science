@@ -3,13 +3,17 @@
 import joblib
 import os
 from pathlib import Path
+import numpy as np
+import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, classification_report
 from sklearn.metrics import f1_score
+from sklearn.calibration import CalibratedClassifierCV
 
 from src.data_loader import load_data
 from src.preprocessing import clean_data
 from src.pipeline import make_pipeline
+from src.drift import build_feature_frame, build_reference_profile
 from src.config import (
     ARTIFACTS_DIR,
     RAW_DATA,
@@ -47,6 +51,10 @@ def train_and_save():
         "columns": list(df.columns),
         "target_rate": float(y.mean()) if len(y) else None,
         "missing_rate": {str(k): float(v) for k, v in missing_rate.items()},
+        "drift_reference": {
+            "features": ref_feature_profile,
+            "prediction_proba": pred_ref,
+        },
     }
 
 
@@ -59,7 +67,17 @@ def train_and_save():
 
     pipe = make_pipeline(X_train)
 
+    # 1) обучаем базовый pipeline
     pipe.fit(X_train, y_train)
+
+    # 2) калибруем вероятности на holdout
+    # используем prefit, чтобы не переобучать pipeline
+    pipe = CalibratedClassifierCV(
+        base_estimator=pipe,
+        method="isotonic",
+        cv="prefit",
+    )
+    pipe.fit(X_test, y_test)
 
     proba = pipe.predict_proba(X_test)[:, 1]
     preds = (proba >= THRESHOLD).astype(int)
@@ -75,6 +93,36 @@ def train_and_save():
         if f1 > best_f1:
             best_f1, best_t = f1, t
     print(f"Best F1 threshold on holdout: {best_t:.2f} (F1={best_f1:.4f}); current THRESHOLD={THRESHOLD}")
+
+    # --------- Drift reference snapshot (train distributions) ---------
+    # Build feature-frame after align/clean/feat (categoricals preserved).
+    try:
+        X_train_feat = build_feature_frame(pipe, X_train)
+        X_test_feat = build_feature_frame(pipe, X_test)
+        ref_feature_profile = build_reference_profile(X_train_feat, numeric_bins=10, max_categories=50)
+    except Exception:
+        ref_feature_profile = {"error": "failed_to_build_feature_reference"}
+
+    # Prediction drift reference: distribution of calibrated probabilities on holdout (stable + production-like).
+    try:
+        proba_ref = pipe.predict_proba(X_test)[:, 1]
+        proba_ref = np.asarray(proba_ref, dtype=float)
+        proba_ref = proba_ref[np.isfinite(proba_ref)]
+        if proba_ref.size:
+            qs = np.linspace(0.0, 1.0, 11)
+            edges = np.quantile(proba_ref, qs)
+            edges = np.unique(edges)
+            # keep mean/std + edges (binning in API)
+            pred_ref = {
+                "mean": float(np.mean(proba_ref)),
+                "std": float(np.std(proba_ref, ddof=0)),
+                "edges": [float(x) for x in edges.tolist()] if edges.size >= 3 else None,
+            }
+        else:
+            pred_ref = {"mean": None, "std": None, "edges": None}
+    except Exception:
+        pred_ref = {"error": "failed_to_build_prediction_reference"}
+
 
     # --------- Versioned artifacts ---------
     repo_root = Path(__file__).resolve().parents[1]

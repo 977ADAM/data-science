@@ -9,9 +9,11 @@ import logging
 import json
 import os
 
-from app.schemas import PredictRequest, PredictResponse
+from app.schemas import PredictRequest, PredictResponse, DriftRequest, DriftResponse
 from src.config import resolve_model_path
 from src.versioning import sha256_file
+from src.drift import build_feature_frame, compare_to_reference
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -104,3 +106,89 @@ def predict(req: PredictRequest):
     df = pd.DataFrame([payload])
     proba = float(pipe.predict_proba(df)[:, 1].item())
     return PredictResponse(churn_probability=proba)
+
+
+@app.post("/drift", response_model=DriftResponse)
+def drift(req: DriftRequest):
+    """
+    Compare incoming batch vs train reference (stored in manifest.json):
+    - numeric: PSI + KS
+    - categorical: frequency drift (L1 + PSI)
+    - prediction drift: distribution of predicted probabilities
+    """
+    pipe = getattr(app.state, "pipe", None)
+    manifest = getattr(app.state, "manifest", None)
+    if pipe is None:
+        logger.error("Pipeline is not loaded, cannot serve /drift")
+        raise HTTPException(status_code=500, detail="Pipeline not loaded")
+    if not manifest:
+        raise HTTPException(status_code=500, detail="Manifest not loaded; drift reference unavailable")
+
+    drift_ref = (((manifest.get("data") or {}).get("profile") or {}).get("drift_reference") or {})
+    feat_ref = (drift_ref.get("features") or {})
+    pred_ref = (drift_ref.get("prediction_proba") or {})
+    if not feat_ref:
+        raise HTTPException(status_code=500, detail="Drift reference missing in manifest")
+
+    # batch -> df
+    customers = req.customers or []
+    if len(customers) == 0:
+        raise HTTPException(status_code=400, detail="customers must be a non-empty list")
+    rows = []
+    for c in customers:
+        rows.append(c.model_dump() if hasattr(c, "model_dump") else c.dict())
+    df_raw = pd.DataFrame(rows)
+
+    # feature-frame (align/clean/feat if possible)
+    df_feat = build_feature_frame(pipe, df_raw)
+
+    drift_metrics = compare_to_reference(df_feat, feat_ref)
+
+    # prediction drift
+    pred_metrics = {}
+    try:
+        proba = pipe.predict_proba(df_raw)[:, 1]
+        proba = np.asarray(proba, dtype=float)
+        proba = proba[np.isfinite(proba)]
+        if proba.size:
+            # PSI based on reference edges (quantile bins)
+            ref_edges = pred_ref.get("edges")
+            if ref_edges and isinstance(ref_edges, list) and len(ref_edges) >= 3:
+                edges = np.asarray(ref_edges, dtype=float)
+                edges = np.unique(edges)
+                if edges.size >= 3:
+                    # compute ref bin probs from edges assuming quantile bins ~ uniform
+                    # (we didn't store ref probs for prediction; bins are quantiles -> approx uniform)
+                    ref_probs = np.ones(edges.size - 1, dtype=float) / float(edges.size - 1)
+                    # current bin probs
+                    idx = np.digitize(proba, edges[1:-1], right=False)
+                    counts = np.bincount(idx, minlength=edges.size - 1).astype(float)
+                    cur_probs = counts / counts.sum() if counts.sum() > 0 else counts
+                    eps = 1e-6
+                    ref_p = np.clip(ref_probs, eps, 1.0); ref_p = ref_p / ref_p.sum()
+                    cur_p = np.clip(cur_probs, eps, 1.0); cur_p = cur_p / cur_p.sum()
+                    psi = float(np.sum((cur_p - ref_p) * np.log(cur_p / ref_p)))
+                else:
+                    psi = None
+            else:
+                psi = None
+
+            pred_metrics = {
+                "rows": int(proba.size),
+                "ref_mean": pred_ref.get("mean"),
+                "ref_std": pred_ref.get("std"),
+                "cur_mean": float(np.mean(proba)),
+                "cur_std": float(np.std(proba, ddof=0)),
+                "psi": psi,
+            }
+        else:
+            pred_metrics = {"rows": 0, "psi": None}
+    except Exception:
+        pred_metrics = {"error": "failed_to_compute_prediction_drift"}
+
+    out = {
+        "data_drift": drift_metrics,
+        "prediction_drift": pred_metrics,
+        "model_version": (manifest or {}).get("model_version"),
+    }
+    return DriftResponse(drift=out)
