@@ -8,7 +8,8 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, classification_report
 from sklearn.metrics import f1_score
-from sklearn.calibration import CalibratedClassifierCV
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 
 from src.data_loader import load_data
 from src.preprocessing import clean_data
@@ -32,6 +33,58 @@ from src.versioning import (
     sha256_file,
 )
 
+class HoldoutCalibratedClassifier:
+    """
+    Калибровка вероятностей на отдельном holdout без CV.
+    Нужна, чтобы не зависеть от classes_/cv-поведения CalibratedClassifierCV.
+    """
+    def __init__(self, estimator, method: str = "isotonic"):
+        self.estimator = estimator
+        self.method = method
+        self.calibrator_ = None
+        self.classes_ = np.array([0, 1], dtype=int)
+
+    def fit(self, X_cal, y_cal):
+        p = self.estimator.predict_proba(X_cal)[:, 1]
+        p = np.asarray(p, dtype=float)
+        p = np.clip(p, 1e-6, 1 - 1e-6)
+
+        y_cal = np.asarray(y_cal, dtype=int)
+
+        if self.method == "isotonic":
+            iso = IsotonicRegression(out_of_bounds="clip")
+            iso.fit(p, y_cal)
+            self.calibrator_ = ("isotonic", iso)
+        elif self.method == "sigmoid":
+            # Platt scaling: логит вероятности -> логрег
+            logit = np.log(p / (1.0 - p)).reshape(-1, 1)
+            lr = LogisticRegression(solver="lbfgs", max_iter=1000)
+            lr.fit(logit, y_cal)
+            self.calibrator_ = ("sigmoid", lr)
+        else:
+            raise ValueError(f"Unknown calibration method: {self.method}")
+
+        return self
+
+    def _calibrate_pos(self, p):
+        p = np.asarray(p, dtype=float)
+        p = np.clip(p, 1e-6, 1 - 1e-6)
+        name, cal = self.calibrator_
+        if name == "isotonic":
+            p_cal = cal.transform(p)
+        else:
+            logit = np.log(p / (1.0 - p)).reshape(-1, 1)
+            p_cal = cal.predict_proba(logit)[:, 1]
+        return np.clip(np.asarray(p_cal, dtype=float), 0.0, 1.0)
+
+    def predict_proba(self, X):
+        p = self.estimator.predict_proba(X)[:, 1]
+        p_cal = self._calibrate_pos(p)
+        return np.column_stack([1.0 - p_cal, p_cal])
+
+    def predict(self, X):
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
 def train_and_save():
     df = load_data()
     df = clean_data(df)
@@ -49,19 +102,17 @@ def train_and_save():
         stratify=y
     )
 
-    pipe = make_pipeline(X_train)
+    base_pipe = make_pipeline(X_train)
 
     # 1) обучаем базовый pipeline
-    pipe.fit(X_train, y_train)
+    base_pipe.fit(X_train, y_train)
 
     # 2) калибруем вероятности на holdout
-    # используем prefit, чтобы не переобучать pipeline
-    pipe = CalibratedClassifierCV(
-        base_estimator=pipe,
-        method="isotonic",
-        cv="prefit",
-    )
-    pipe.fit(X_test, y_test)
+    # Не используем CalibratedClassifierCV, чтобы не упираться в classes_/cross_val_predict.
+    pipe = HoldoutCalibratedClassifier(
+        estimator=base_pipe,
+        method="isotonic",   # либо "sigmoid"
+    ).fit(X_test, y_test)
 
     proba = pipe.predict_proba(X_test)[:, 1]
     preds = (proba >= THRESHOLD).astype(int)
@@ -81,8 +132,10 @@ def train_and_save():
     # --------- Drift reference snapshot (train distributions) ---------
     # Build feature-frame after align/clean/feat (categoricals preserved).
     try:
-        X_train_feat = build_feature_frame(pipe, X_train)
-        X_test_feat = build_feature_frame(pipe, X_test)
+        # Для фичей нужен именно базовый pipeline (preprocess/feat),
+        # а не калибратор-обёртка.
+        X_train_feat = build_feature_frame(base_pipe, X_train)
+        X_test_feat = build_feature_frame(base_pipe, X_test)
         ref_feature_profile = build_reference_profile(X_train_feat, numeric_bins=10, max_categories=50)
     except Exception:
         ref_feature_profile = {"error": "failed_to_build_feature_reference"}
