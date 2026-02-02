@@ -227,9 +227,7 @@ class FeatureBuilder(BaseEstimator, TransformerMixin):
             df["is_month_to_month"] = 0
 
         if "PaymentMethod" in df.columns:
-            df["is_month_to_month"] = (
-                df["Contract"].astype(str).str.strip().eq("Month-to-month")
-            ).astype(int)
+            df["is_auto_pay"] = df["PaymentMethod"].str.contains("automatic", case=False).astype(int)
         else:
             df["is_auto_pay"] = 0
 

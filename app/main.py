@@ -4,22 +4,60 @@ from fastapi import FastAPI, HTTPException
 from contextlib import asynccontextmanager
 from pathlib import Path
 import logging
+import json
 
 from app.schemas import PredictRequest, PredictResponse
-from src.config import MODEL_PATH
+from src.config import resolve_model_path
+from src.versioning import sha256_file
 
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
-PIPELINE_PATH = MODEL_PATH
+PIPELINE_PATH = resolve_model_path()
+
+# Определяем директорию артефакта и manifest рядом с файлом модели.
+# - versioned: models/<MODEL_VERSION>/churn_pipeline.pkl  -> manifest рядом
+# - legacy:    models/churn_pipeline.pkl                  -> manifest может отсутствовать
+MODEL_DIR = PIPELINE_PATH.parent
+MANIFEST_PATH = MODEL_DIR / "manifest.json" if MODEL_DIR != PIPELINE_PATH.parent.parent else None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    pipe = None
     try:
-        app.state.pipe = joblib.load(str(PIPELINE_PATH))
+        pipe = joblib.load(str(PIPELINE_PATH))
     except Exception:
-        app.state.pipe = None
         logger.exception("Failed to load pipeline from %s", PIPELINE_PATH)
+        pipe = None
+
+    # manifest optional (но очень желателен)
+    manifest = None
+    try:
+        if MANIFEST_PATH is not None and MANIFEST_PATH.exists():
+            manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("Failed to load manifest from %s", MANIFEST_PATH)
+        manifest = None
+
+    # Safety check: если есть manifest, проверяем целостность артефакта модели.
+    # Несовпадение sha256 => не поднимаем модель (лучше fail-safe, чем тихий дрейф/подмена).
+    if pipe is not None and manifest is not None:
+        try:
+            expected_sha = (((manifest.get("artifacts") or {}).get("pipeline_sha256")) or "").strip()
+            if expected_sha:
+                actual_sha = sha256_file(PIPELINE_PATH)
+                if actual_sha != expected_sha:
+                    logger.error(
+                        "Pipeline sha256 mismatch! path=%s expected=%s actual=%s. Refusing to serve predictions.",
+                        PIPELINE_PATH, expected_sha, actual_sha
+                    )
+                    pipe = None
+        except Exception:
+            logger.exception("Failed during pipeline integrity check for %s", PIPELINE_PATH)
+            pipe = None
+
+    app.state.pipe = pipe
+    app.state.manifest = manifest
     yield
 
 app = FastAPI(title="Churn Prediction API", version="1.0.0", lifespan=lifespan)
@@ -27,10 +65,16 @@ app = FastAPI(title="Churn Prediction API", version="1.0.0", lifespan=lifespan)
 @app.get("/health")
 def health():
     pipe = getattr(app.state, "pipe", None)
+    manifest = getattr(app.state, "manifest", None)
     return {
         "status": "ok" if pipe is not None else "pipeline_not_loaded",
         "pipeline_path": str(PIPELINE_PATH),
+        "artifact_dir": str(MODEL_DIR),
         "pipeline_loaded": pipe is not None,
+        "manifest_loaded": manifest is not None,
+        "model_version": (manifest or {}).get("model_version"),
+        "data_sha256": ((manifest or {}).get("data") or {}).get("raw_data_sha256"),
+        "code_sha256": ((manifest or {}).get("code") or {}).get("code_sha256"),
     }
 
 
