@@ -38,6 +38,18 @@ def train_and_save():
     # X raw (важно: оставляем сырые категориальные!)
     X = df.drop(columns=[TARGET])
 
+    # --------- Data profile (quality snapshot) ---------
+    # This is intentionally lightweight but very useful for debugging / drift detection.
+    # Keep it stable across runs (sort keys; basic python types).
+    missing_rate = (df.isna().mean()).to_dict()
+    data_profile = {
+        "rows": int(len(df)),
+        "columns": list(df.columns),
+        "target_rate": float(y.mean()) if len(y) else None,
+        "missing_rate": {str(k): float(v) for k, v in missing_rate.items()},
+    }
+
+
     X_train, X_test, y_train, y_test = train_test_split(
         X, y,
         test_size=TEST_SIZE,
@@ -99,6 +111,7 @@ def train_and_save():
         raw_data_path=Path(RAW_DATA),
         training_params=training_params,
         artifacts=artifacts,
+        data_profile=data_profile,
     )
     atomic_write_json(manifest_path, manifest.to_dict())
 

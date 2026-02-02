@@ -116,6 +116,7 @@ def build_manifest(
     raw_data_path: Path | None,
     training_params: dict,
     artifacts: dict,
+    data_profile: dict | None = None,
     extra_code_globs: Iterable[str] = ("src/**/*.py", "app/**/*.py", "pyproject.toml", "requirements*.txt", "Dockerfile"),
 ) -> Manifest:
     created = datetime.now(timezone.utc).isoformat()
@@ -128,6 +129,16 @@ def build_manifest(
         }
     else:
         data_block = {"raw_data_path": str(raw_data_path) if raw_data_path else None}
+
+    # Optional: lightweight data quality/profile snapshot (helps detect data drift / broken ETL).
+    if data_profile is not None:
+        # ensure JSON-serializable
+        try:
+            json.dumps(data_profile, ensure_ascii=False, sort_keys=True)
+            data_block["profile"] = data_profile
+        except Exception:
+            # Don't fail training because of profile serialization.
+            data_block["profile"] = {"error": "data_profile_not_json_serializable"}
 
     code_block = code_fingerprint(repo_root, extra_code_globs)
 
