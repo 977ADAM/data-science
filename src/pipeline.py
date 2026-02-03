@@ -9,7 +9,7 @@ from sklearn.base import BaseEstimator, TransformerMixin, ClassifierMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
-from catboost import CatBoostClassifier
+from catboost import CatBoostClassifier, CatBoostRegressor
 
 from src.preprocessing import Cleaner
 
@@ -215,6 +215,43 @@ class SklearnCatBoostClassifier(BaseEstimator, ClassifierMixin):
             self.catboost_params.update(params)
         return self
 
+
+class SklearnCatBoostRegressor(BaseEstimator):
+    """
+    sklearn-compatible wrapper around catboost.CatBoostRegressor.
+    Used for continuous targets (tau / pseudo-outcomes).
+    """
+
+    def __init__(self, **catboost_params):
+        self.catboost_params = dict(catboost_params)
+
+    def fit(self, X, y):
+        self.model_ = CatBoostRegressor(**self.catboost_params)
+        self.model_.fit(X, y)
+        return self
+
+    def predict(self, X):
+        return self.model_.predict(X)
+
+    def __sklearn_is_fitted__(self):
+        return hasattr(self, "model_")
+
+    def _more_tags(self):
+        return {"requires_y": True}
+
+    def get_params(self, deep=True):
+        return dict(self.catboost_params)
+
+    def set_params(self, **params):
+        if "catboost_params" in params:
+            cb = params.pop("catboost_params")
+            if cb is not None:
+                self.catboost_params = dict(cb)
+        if params:
+            self.catboost_params.update(params)
+        return self
+
+
 def make_pipeline(X_sample: pd.DataFrame) -> Pipeline:
     """
     Создаём pipeline на основе примера данных.
@@ -266,4 +303,54 @@ def make_pipeline(X_sample: pd.DataFrame) -> Pipeline:
         ("model", model),
     ])
 
+    return pipe
+
+
+
+
+def make_regression_pipeline(X_sample: pd.DataFrame) -> Pipeline:
+    """
+    Same preprocessing pipeline as make_pipeline(), but with a CatBoost regressor head.
+    Suitable for uplift effect models (tau / pseudo-outcomes).
+    """
+    drop_cols = [c for c in ["customerID", "Churn"] if c in X_sample.columns]
+    X_sample = X_sample.drop(columns=drop_cols)
+    expected_raw_cols = list(X_sample.columns)
+
+    cleaner = Cleaner()
+    fb = FeatureBuilder()
+    Xc = cleaner.fit_transform(X_sample)
+    tmp = fb.fit(Xc).transform(Xc)
+
+    numeric_cols = [c for c in tmp.columns if pd.api.types.is_numeric_dtype(tmp[c])]
+    categorical_cols = [c for c in tmp.columns if c not in numeric_cols]
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", "passthrough", numeric_cols),
+            ("cat", _make_ohe(), categorical_cols),
+        ],
+        remainder="drop",
+    )
+
+    model = SklearnCatBoostRegressor(
+        iterations=600,
+        depth=6,
+        learning_rate=0.05,
+        loss_function="RMSE",
+        verbose=0,
+        random_seed=42,
+        thread_count=1,
+        allow_writing_files=False,
+    )
+
+    pipe = Pipeline(
+        steps=[
+            ("align", AlignColumns(expected_raw_cols)),
+            ("clean", Cleaner()),
+            ("feat", FeatureBuilder()),
+            ("prep", preprocessor),
+            ("model", model),
+        ]
+    )
     return pipe

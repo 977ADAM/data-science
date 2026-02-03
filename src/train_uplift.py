@@ -16,7 +16,8 @@ from src.config import ARTIFACTS_DIR, RAW_DATA, RANDOM_STATE, TEST_SIZE, TARGET
 from src.data_loader import load_data
 from src.pipeline import make_pipeline
 from src.preprocessing import clean_data
-from src.uplift import TLearner
+from src.pipeline import make_regression_pipeline
+from src.uplift import DRLearner, SLearner, TLearner, XLearner
 from src.versioning import (
     Manifest,
     atomic_write_json,
@@ -39,6 +40,8 @@ def train_and_save_uplift():
     """
 
     TREATMENT_COL = os.getenv("TREATMENT_COL", "treatment").strip()
+    UPLIFT_LEARNER = os.getenv("UPLIFT_LEARNER", "t").strip().lower()
+    # accepted: t | s | x | dr
 
     df = load_data()
     df = clean_data(df)
@@ -78,18 +81,54 @@ def train_and_save_uplift():
     y_train = np.asarray(y_train, dtype=int)
     y_test = np.asarray(y_test, dtype=int)
 
-    # T-learner with two separately trained estimators
-    def estimator_factory():
+    # Factories
+    def clf_factory():
         # IMPORTANT: build a fresh pipeline each time
         return make_pipeline(X_train)
 
-    tlearner = TLearner(estimator_factory)
-    tlearner.fit(X_train, t_train, y_train)
+    def reg_factory():
+        return make_regression_pipeline(X_train)
+
+    # Learner selection
+    if UPLIFT_LEARNER in ("t", "t-learner", "tlearner"):
+        learner = TLearner(clf_factory)
+        learner.fit(X_train, t_train, y_train)
+    elif UPLIFT_LEARNER in ("s", "s-learner", "slearner"):
+        # For S-learner we must include the treatment feature as an input column
+        X_train_s = X_train.copy()
+        X_train_s[TREATMENT_COL] = t_train
+
+        def s_factory():
+            return make_pipeline(X_train_s)
+
+        learner = SLearner(s_factory, treatment_col=TREATMENT_COL)
+        learner.fit(X_train, t_train, y_train)
+    elif UPLIFT_LEARNER in ("x", "x-learner", "xlearner"):
+        learner = XLearner(
+            outcome_model_factory=clf_factory,
+            effect_model_factory=reg_factory,
+            propensity_model_factory=clf_factory,
+        )
+        learner.fit(X_train, t_train, y_train)
+    elif UPLIFT_LEARNER in ("dr", "dr-learner", "drlearner", "doubly-robust", "doubly_robust"):
+        learner = DRLearner(
+            outcome_model_factory=clf_factory,
+            propensity_model_factory=clf_factory,
+            effect_model_factory=reg_factory,
+        )
+        learner.fit(X_train, t_train, y_train)
+    else:
+        raise ValueError(
+            f"Unknown UPLIFT_LEARNER={UPLIFT_LEARNER!r}. Expected one of: t, s, x, dr."
+        )
 
     # Optional: calibrate each model on its group holdout (if enough data)
     try:
-        mt = tlearner.artifacts_.model_treated
-        mc = tlearner.artifacts_.model_control
+        # Only applies to learners that expose per-group outcome models (TLearner)
+        mt = getattr(getattr(learner, "artifacts_", None), "model_treated", None)
+        mc = getattr(getattr(learner, "artifacts_", None), "model_control", None)
+        if mt is None or mc is None:
+            raise AttributeError("no per-group outcome models to calibrate")
 
         mask_tt = t_test == 1
         mask_tc = t_test == 0
@@ -97,8 +136,8 @@ def train_and_save_uplift():
         if int(mask_tt.sum()) >= 50 and int(mask_tc.sum()) >= 50:
             mt_cal = HoldoutCalibratedClassifier(mt, method="isotonic").fit(X_test[mask_tt], y_test[mask_tt])
             mc_cal = HoldoutCalibratedClassifier(mc, method="isotonic").fit(X_test[mask_tc], y_test[mask_tc])
-            tlearner.artifacts_.model_treated = mt_cal
-            tlearner.artifacts_.model_control = mc_cal
+            learner.artifacts_.model_treated = mt_cal
+            learner.artifacts_.model_control = mc_cal
     except Exception:
         # calibration is a nice-to-have; never fail the training run because of it
         pass
@@ -109,11 +148,11 @@ def train_and_save_uplift():
         mask_tt = t_test == 1
         mask_tc = t_test == 0
         if int(mask_tt.sum()) >= 2 and len(np.unique(y_test[mask_tt])) == 2:
-            auc_t = float(roc_auc_score(y_test[mask_tt], tlearner.predict_proba_treated(X_test[mask_tt])))
+            auc_t = float(roc_auc_score(y_test[mask_tt], learner.predict_proba_treated(X_test[mask_tt])))
         else:
             auc_t = None
         if int(mask_tc.sum()) >= 2 and len(np.unique(y_test[mask_tc])) == 2:
-            auc_c = float(roc_auc_score(y_test[mask_tc], tlearner.predict_proba_control(X_test[mask_tc])))
+            auc_c = float(roc_auc_score(y_test[mask_tc], learner.predict_proba_control(X_test[mask_tc])))
         else:
             auc_c = None
         metrics = {
@@ -121,6 +160,7 @@ def train_and_save_uplift():
             "control_rows": int(mask_tc.sum()),
             "auc_treated": auc_t,
             "auc_control": auc_c,
+            "uplift_learner": UPLIFT_LEARNER,
         }
     except Exception:
         metrics = {"error": "failed_to_compute_group_auc"}
@@ -136,7 +176,7 @@ def train_and_save_uplift():
     manifest_path = model_dir / "manifest_uplift.json"
 
     tmp_model_path = model_path.with_suffix(".pkl.tmp")
-    joblib.dump(tlearner, tmp_model_path)
+    joblib.dump(learner, tmp_model_path)
     os.replace(tmp_model_path, model_path)
 
     artifacts = {
@@ -147,6 +187,7 @@ def train_and_save_uplift():
     training_params = {
         "target": TARGET,
         "treatment_col": TREATMENT_COL,
+        "uplift_learner": UPLIFT_LEARNER,
         "random_state": RANDOM_STATE,
         "test_size": TEST_SIZE,
         "metrics": metrics,
