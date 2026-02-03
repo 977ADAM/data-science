@@ -16,6 +16,8 @@ from app.schemas import (
     DriftResponse,
     UpliftRequest,
     UpliftResponse,
+    ABSelectRequest,
+    ABSelectResponse,
 )
 from src.config import resolve_model_path, resolve_uplift_model_path
 from src.versioning import sha256_file
@@ -412,3 +414,50 @@ def metrics():
 
     body = "".join(lines)
     return Response(content=body, media_type="text/plain; version=0.0.4")
+
+@app.post("/ab/select", response_model=ABSelectResponse)
+def ab_select(req: ABSelectRequest):
+    """
+    A/B targeting:
+      - Control  : TOP-K by churn probability
+      - Treatment: TOP-K by uplift score
+    """
+    pipe = getattr(app.state, "pipe", None)
+    uplift_pipe = getattr(app.state, "uplift_pipe", None)
+
+    if pipe is None:
+        raise HTTPException(status_code=500, detail="Churn model not loaded")
+    if uplift_pipe is None:
+        raise HTTPException(status_code=500, detail="Uplift model not loaded")
+
+    customers = req.customers or []
+    k = int(req.k)
+
+    if k <= 0:
+        raise HTTPException(status_code=400, detail="k must be > 0")
+    if len(customers) == 0:
+        raise HTTPException(status_code=400, detail="customers must be non-empty")
+
+    rows = []
+    for c in customers:
+        rows.append(c.model_dump() if hasattr(c, "model_dump") else c.dict())
+    df = pd.DataFrame(rows)
+
+    # -------- Control: churn score --------
+    churn_scores = pipe.predict_proba(df)[:, 1]
+    churn_scores = np.asarray(churn_scores, dtype=float)
+
+    order_churn = np.argsort(-churn_scores)
+    control_top_k_idx = order_churn[: min(k, len(order_churn))].tolist()
+
+    # -------- Treatment: uplift score --------
+    uplift_scores = uplift_pipe.predict_uplift(df)
+    uplift_scores = np.asarray(uplift_scores, dtype=float)
+
+    order_uplift = np.argsort(-uplift_scores)
+    treatment_top_k_idx = order_uplift[: min(k, len(order_uplift))].tolist()
+
+    return ABSelectResponse(
+        control_top_k_idx=control_top_k_idx,
+        treatment_top_k_idx=treatment_top_k_idx,
+    )

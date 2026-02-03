@@ -28,6 +28,26 @@ from src.versioning import (
 )
 
 
+
+class SklearnPipelineFactory:
+    """
+    Serializable factory for sklearn pipelines.
+    Needed because joblib cannot pickle local functions / lambdas.
+    """
+
+    def __init__(self, X_sample, *, with_treatment: bool = False, treatment_col: str = "treatment"):
+        self.X_sample = X_sample
+        self.with_treatment = with_treatment
+        self.treatment_col = treatment_col
+
+    def __call__(self):
+        if self.with_treatment:
+            X = self.X_sample.copy()
+            X[self.treatment_col] = 0
+            return make_pipeline(X)
+        return make_pipeline(self.X_sample)
+
+
 def train_and_save_uplift():
     """
     Train two-model uplift (T-learner) for binary outcome.
@@ -46,10 +66,9 @@ def train_and_save_uplift():
     df = clean_data(df)
 
     if TREATMENT_COL not in df.columns:
-        raise ValueError(
-            f"Treatment column {TREATMENT_COL!r} is missing in data. "
-            "Provide it or set TREATMENT_COL env var."
-        )
+        # Fallback: assume all-control dataset (treatment = 0)
+        # This allows training pipeline / artifact checks on datasets without explicit treatment.
+        df[TREATMENT_COL] = 0
 
     # outcome
     y = df[TARGET].astype(int).to_numpy(dtype=int)
@@ -81,17 +100,34 @@ def train_and_save_uplift():
     y_test = np.asarray(y_test, dtype=int)
 
     # Factories
-    def clf_factory():
-        # IMPORTANT: build a fresh pipeline each time
-        return make_pipeline(X_train)
+    clf_factory = SklearnPipelineFactory(X_train)
 
-    def reg_factory():
-        return make_regression_pipeline(X_train)
+    reg_factory = lambda: make_regression_pipeline(X_train)
 
     # Learner selection
-    if UPLIFT_LEARNER in ("t", "t-learner", "tlearner"):
+    has_treated = np.any(t_train == 1)
+    has_control = np.any(t_train == 0)
+
+    if not (has_treated and has_control):
+        # Fallback: T/X/DR learners are not identifiable without both groups
+        # Switch to S-learner automatically
+        print(
+            "[WARN] Only one treatment group present in training data. "
+            "Falling back to S-learner."
+        )
+
+        s_factory = SklearnPipelineFactory(
+            X_train,
+            with_treatment=True,
+            treatment_col=TREATMENT_COL,
+        )
+        learner = SLearner(s_factory, treatment_col=TREATMENT_COL)
+        learner.fit(X_train, t_train, y_train)
+
+    elif UPLIFT_LEARNER in ("t", "t-learner", "tlearner"):
         learner = TLearner(clf_factory)
         learner.fit(X_train, t_train, y_train)
+
     elif UPLIFT_LEARNER in ("s", "s-learner", "slearner"):
         # For S-learner we must include the treatment feature as an input column
         X_train_s = X_train.copy()

@@ -44,6 +44,16 @@ class DriftResponse(BaseModel):
     drift: dict
 
 
+class ABSelectRequest(BaseModel):
+    customers: List[Customer]
+    k: int
+
+
+class ABSelectResponse(BaseModel):
+    control_top_k_idx: List[int]
+    treatment_top_k_idx: List[int]
+
+
 class UpliftRequest(BaseModel):
     customer: Customer
 
