@@ -165,6 +165,14 @@ def train_and_save_uplift():
 
     # Latest pointers (portable)
     safe_mkdir(ARTIFACTS_DIR)
+    latest_link = ARTIFACTS_DIR / "latest_uplift"
+    try:
+        if latest_link.exists() or latest_link.is_symlink():
+            latest_link.unlink()
+        latest_link.symlink_to(model_dir, target_is_directory=True)
+    except Exception:
+        # если symlink запрещён, просто не падаем
+        pass
     atomic_write_text(ARTIFACTS_DIR / "latest_uplift.txt", model_version + "\n")
 
     print(f"Saved uplift model: {model_path}")

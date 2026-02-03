@@ -4,7 +4,6 @@ import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from contextlib import asynccontextmanager
-from pathlib import Path
 import logging
 import json
 import os
@@ -72,7 +71,6 @@ def _psi(ref_p: np.ndarray, cur_p: np.ndarray, eps: float = 1e-6) -> float | Non
 
 logger = logging.getLogger(__name__)
 
-BASE_DIR = Path(__file__).resolve().parent
 PIPELINE_PATH = resolve_model_path()
 
 UPLIFT_PIPELINE_PATH = resolve_uplift_model_path()

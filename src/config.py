@@ -29,6 +29,7 @@ LEGACY_MODEL_PATH = ARTIFACTS_DIR / "churn_pipeline.pkl"
 # Optional uplift model artifact name (two-model T-learner)
 UPLIFT_MODEL_FILENAME = "uplift_tlearner.pkl"
 
+UPLIFT_MODEL_VERSION = os.getenv("UPLIFT_MODEL_VERSION", "latest").strip()
 
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
@@ -95,10 +96,44 @@ def resolve_model_path(version: str | None = None) -> Path:
 def resolve_uplift_model_path(version: str | None = None) -> Path:
     """
     Возвращает путь до uplift T-learner артефакта.
-    По умолчанию ищет в versioned директории рядом с churn_pipeline.pkl.
+    По умолчанию ищет в отдельном uplift "latest" указателе.
     """
-    d = resolve_model_dir(version)
+    d = resolve_uplift_model_dir(version)
     return d / UPLIFT_MODEL_FILENAME
+
+
+def resolve_uplift_model_dir(version: str | None = None) -> Path:
+    """
+    Определяет директорию uplift-артефакта модели.
+    Приоритет:
+      1) явный version
+      2) env UPLIFT_MODEL_VERSION
+      3) models/latest_uplift (symlink/dir)
+      4) models/latest_uplift.txt (текстовый указатель)
+    """
+    v = _validate_model_version(version or UPLIFT_MODEL_VERSION or "latest")
+    if v and v != "latest":
+        return ARTIFACTS_DIR / v
+
+    # symlink/dir latest_uplift
+    latest_dir = ARTIFACTS_DIR / "latest_uplift"
+    if latest_dir.exists():
+        return latest_dir
+
+    # textual pointer (portable)
+    latest_txt = ARTIFACTS_DIR / "latest_uplift.txt"
+    if latest_txt.exists():
+        try:
+            target = latest_txt.read_text(encoding="utf-8").strip()
+            if target:
+                p = ARTIFACTS_DIR / target
+                if p.exists():
+                    return p
+        except Exception:
+            pass
+
+    # fallback
+    return ARTIFACTS_DIR / "latest_uplift"
 
 TARGET = "Churn"
 RANDOM_STATE = 42

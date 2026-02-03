@@ -1,11 +1,10 @@
 # app/schemas.py
 
-from typing import Optional, Union
-from typing import List
+from typing import List, Optional, Union
 from pydantic import BaseModel, Field
 
 class Customer(BaseModel):
-    
+
     gender: Optional[str] = None
     SeniorCitizen: Optional[int] = Field(default=None, ge=0, le=1)
     Partner: Optional[str] = Field(default="No")
