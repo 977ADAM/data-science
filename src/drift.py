@@ -59,7 +59,7 @@ def _ks_stat_and_pvalue(x: np.ndarray, y: np.ndarray) -> tuple[float | None, flo
     return d, p
 
 
-def _psi_from_probs(ref_p: np.ndarray, cur_p: np.ndarray, eps: float = 1e-6) -> float | None:
+def psi_from_probs(ref_p: np.ndarray, cur_p: np.ndarray, eps: float = 1e-6) -> float | None:
     ref_p = np.asarray(ref_p, dtype=float)
     cur_p = np.asarray(cur_p, dtype=float)
     if ref_p.size == 0 or cur_p.size == 0 or ref_p.size != cur_p.size:
@@ -70,6 +70,17 @@ def _psi_from_probs(ref_p: np.ndarray, cur_p: np.ndarray, eps: float = 1e-6) -> 
     cur_p = cur_p / cur_p.sum()
     return float(np.sum((cur_p - ref_p) * np.log(cur_p / ref_p)))
 
+
+def ks_stat_and_pvalue(x: np.ndarray, y: np.ndarray) -> tuple[float | None, float | None]:
+    """
+    Public wrapper for two-sample KS test (asymptotic p-value approximation).
+    Kept here to reuse across training/API without duplicating code.
+    """
+    return _ks_stat_and_pvalue(x, y)
+
+
+# Backward-compat aliases (internal code may still call old private names)
+_psi_from_probs = psi_from_probs
 
 def _bin_probs(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
     # bins are [e0,e1),[e1,e2),...,[e_{k-1},e_k] where last is inclusive
@@ -215,7 +226,7 @@ def compare_to_reference(
             rp = np.asarray(ref_probs, dtype=float)
             cp = _bin_probs(cur_vals, e)
             if cp.size == rp.size and cp.size > 0:
-                psi = _psi_from_probs(rp, cp)
+                psi = psi_from_probs(rp, cp)
 
         # KS: compare current vs synthetic from reference? No -> use reference bins not enough.
         # We expect to have reference raw values? Not stored. So KS is computed vs reference bin-approx is not valid.
@@ -232,7 +243,7 @@ def compare_to_reference(
                 mids = (e[:-1] + e[1:]) / 2.0
                 if mids.size == rp.size and mids.size > 0 and rp.sum() > 0:
                     syn = np.random.default_rng(42).choice(mids, size=n_syn, p=rp / rp.sum())
-                    ks_stat, ks_p = _ks_stat_and_pvalue(syn, cur_vals)
+                    ks_stat, ks_p = ks_stat_and_pvalue(syn, cur_vals)
         except Exception:
             ks_stat, ks_p = None, None
 
@@ -292,7 +303,7 @@ def compare_to_reference(
             cur_p = cur_p / cur_p.sum()
 
         l1 = float(0.5 * np.sum(np.abs(cur_p - ref_p)))
-        psi = _psi_from_probs(ref_p, cur_p)
+        psi = psi_from_probs(ref_p, cur_p)
 
         results["categorical"][col] = {
             "present": True,

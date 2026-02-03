@@ -20,6 +20,20 @@ def _as_1d_float(a: Any) -> np.ndarray:
         x = x.reshape(-1)
     return x.astype(float)
 
+def _slice_rows(X, mask: np.ndarray):
+    """
+    Row-slice helper that works for both pandas.DataFrame and numpy arrays.
+    Pandas gotcha: X[mask] slices columns, not rows (unless mask is an aligned Series).
+    """
+    m = np.asarray(mask, dtype=bool).reshape(-1)
+    try:
+        import pandas as pd
+        if isinstance(X, pd.DataFrame):
+            # mask is positional; use iloc
+            return X.iloc[m]
+    except Exception:
+        pass
+    return np.asarray(X)[m]
 
 def _predict_proba_pos(estimator: Any, X) -> np.ndarray:
     """
@@ -40,9 +54,11 @@ def _predict_regression(estimator: Any, X) -> np.ndarray:
     Predict continuous target (tau, pseudo-outcome, etc.)
     Supports predict(); if predict_proba exists, uses pos proba.
     """
-    if hasattr(estimator, "predict"):
-        return np.asarray(estimator.predict(X), dtype=float).reshape(-1)
-    return _predict_proba_pos(estimator, X).reshape(-1)
+    # If estimator exposes probabilities (e.g., classifier used as effect model),
+    # prefer positive-class probability as a continuous signal.
+    if hasattr(estimator, "predict_proba"):
+        return _predict_proba_pos(estimator, X).reshape(-1)
+    return np.asarray(estimator.predict(X), dtype=float).reshape(-1)
 
 
 def _augment_with_treatment(X, t: np.ndarray, *, treatment_col: str = "treatment"):
@@ -109,8 +125,10 @@ class TLearner:
         mt = self.estimator_factory()
         mc = self.estimator_factory()
 
-        mt.fit(X[mask_t], y[mask_t])
-        mc.fit(X[mask_c], y[mask_c])
+        Xt = _slice_rows(X, mask_t)
+        Xc = _slice_rows(X, mask_c)
+        mt.fit(Xt, y[mask_t])
+        mc.fit(Xc, y[mask_c])
 
         self.artifacts_ = TLearnerArtifacts(model_treated=mt, model_control=mc)
         return self
@@ -301,8 +319,10 @@ class XLearner:
         # 1) outcome models
         mu1 = self.outcome_model_factory()
         mu0 = self.outcome_model_factory()
-        mu1.fit(X[mask_t], y[mask_t])
-        mu0.fit(X[mask_c], y[mask_c])
+        Xt = _slice_rows(X, mask_t)
+        Xc = _slice_rows(X, mask_c)
+        mu1.fit(Xt, y[mask_t])
+        mu0.fit(Xc, y[mask_c])
 
         # 2) imputed effects
         mu0_all = _predict_proba_pos(mu0, X)
@@ -313,8 +333,8 @@ class XLearner:
         # 3) effect models
         tau1 = self.effect_model_factory()
         tau0 = self.effect_model_factory()
-        tau1.fit(X[mask_t], d1)
-        tau0.fit(X[mask_c], d0)
+        tau1.fit(Xt, d1)
+        tau0.fit(Xc, d0)
 
         # 4) propensity
         e = self.propensity_model_factory()
@@ -437,8 +457,10 @@ class DRLearner:
 
         mu1 = self.outcome_model_factory()
         mu0 = self.outcome_model_factory()
-        mu1.fit(X[mask_t], y[mask_t])
-        mu0.fit(X[mask_c], y[mask_c])
+        Xt = _slice_rows(X, mask_t)
+        Xc = _slice_rows(X, mask_c)
+        mu1.fit(Xt, y[mask_t])
+        mu0.fit(Xc, y[mask_c])
 
         e = self.propensity_model_factory()
         e.fit(X, t)

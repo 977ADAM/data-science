@@ -19,54 +19,12 @@ from app.schemas import (
 )
 from src.config import resolve_model_path, resolve_uplift_model_path
 from src.versioning import sha256_file
-from src.drift import build_feature_frame, compare_to_reference
+from src.drift import build_feature_frame, compare_to_reference, ks_stat_and_pvalue, psi_from_probs
 from src.calibration import HoldoutCalibratedClassifier
 import numpy as np
 import math
 from fastapi.responses import Response
 from threading import Lock
-
-def _ks_stat_and_pvalue(x: np.ndarray, y: np.ndarray) -> tuple[float | None, float | None]:
-    """Two-sample KS test with asymptotic p-value approximation (no scipy dependency)."""
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    x = x[np.isfinite(x)]
-    y = y[np.isfinite(y)]
-    n1 = x.size
-    n2 = y.size
-    if n1 < 2 or n2 < 2:
-        return None, None
-
-    x_sort = np.sort(x)
-    y_sort = np.sort(y)
-    data_all = np.sort(np.unique(np.concatenate([x_sort, y_sort])))
-    cdf1 = np.searchsorted(x_sort, data_all, side="right") / n1
-    cdf2 = np.searchsorted(y_sort, data_all, side="right") / n2
-    d = float(np.max(np.abs(cdf1 - cdf2)))
-
-    # Asymptotic p-value approximation via Kolmogorov distribution.
-    en = math.sqrt(n1 * n2 / (n1 + n2))
-    lam = (en + 0.12 + 0.11 / en) * d
-    s = 0.0
-    for j in range(1, 101):
-        term = (-1) ** (j - 1) * math.exp(-2.0 * (j * lam) ** 2)
-        s += term
-        if abs(term) < 1e-10:
-            break
-    p = max(0.0, min(1.0, 2.0 * s))
-    return d, p
-
-
-def _psi(ref_p: np.ndarray, cur_p: np.ndarray, eps: float = 1e-6) -> float | None:
-    ref_p = np.asarray(ref_p, dtype=float)
-    cur_p = np.asarray(cur_p, dtype=float)
-    if ref_p.size == 0 or cur_p.size == 0 or ref_p.size != cur_p.size:
-        return None
-    ref_p = np.clip(ref_p, eps, 1.0)
-    cur_p = np.clip(cur_p, eps, 1.0)
-    ref_p = ref_p / ref_p.sum()
-    cur_p = cur_p / cur_p.sum()
-    return float(np.sum((cur_p - ref_p) * np.log(cur_p / ref_p)))
 
 
 logger = logging.getLogger(__name__)
@@ -340,7 +298,7 @@ def drift(req: DriftRequest):
                     else:
                         ref_probs = np.ones(edges.size - 1, dtype=float) / float(edges.size - 1)
 
-                    psi = _psi(ref_probs, cur_probs)
+                    psi = psi_from_probs(ref_probs, cur_probs)
 
                     # KS: approximate reference distribution from bins (midpoints + ref_probs)
                     try:
@@ -348,7 +306,7 @@ def drift(req: DriftRequest):
                         if mids.size == ref_probs.size and ref_probs.sum() > 0:
                             n_syn = int(min(5000, max(200, proba.size * 2)))
                             syn = np.random.default_rng(42).choice(mids, size=n_syn, p=ref_probs / ref_probs.sum())
-                            ks_stat, ks_pvalue = _ks_stat_and_pvalue(syn, proba)
+                            ks_stat, ks_pvalue = ks_stat_and_pvalue(syn, proba)
                     except Exception:
                         ks_stat, ks_pvalue = None, None
 
