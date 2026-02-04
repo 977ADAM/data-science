@@ -23,9 +23,11 @@ from src.config import resolve_model_path, resolve_uplift_model_path
 from src.versioning import sha256_file
 from src.drift import build_feature_frame, compare_to_reference, ks_stat_and_pvalue, psi_from_probs
 from src.calibration import HoldoutCalibratedClassifier
+from src.train_uplift import SklearnPipelineFactory
 import numpy as np
 import math
 from fastapi.responses import Response
+from fastapi.middleware.cors import CORSMiddleware
 from threading import Lock
 
 
@@ -39,6 +41,18 @@ PSI_WARNING = 0.2
 PSI_CRITICAL = 0.3
 
 _metrics_lock = Lock()
+
+
+def _asdict(obj) -> dict:
+    """pydantic v2 -> model_dump; pydantic v1 -> dict; plain dict passthrough."""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if hasattr(obj, "dict"):
+        return obj.dict()
+    if isinstance(obj, dict):
+        return obj
+    raise TypeError(f"Unsupported payload type: {type(obj)!r}")
+
 
 def _init_metrics_state(app: FastAPI) -> None:
     """
@@ -96,11 +110,17 @@ async def lifespan(app: FastAPI):
         # Future artifacts will be stable because the class now lives in src.calibration.
         # ---------------------------------------------------------------------
         mp_main = sys.modules.get("__mp_main__")
-        if mp_main is not None and not hasattr(mp_main, "HoldoutCalibratedClassifier"):
-            setattr(mp_main, "HoldoutCalibratedClassifier", HoldoutCalibratedClassifier)
+        if mp_main is not None:
+            if not hasattr(mp_main, "HoldoutCalibratedClassifier"):
+                setattr(mp_main, "HoldoutCalibratedClassifier", HoldoutCalibratedClassifier)
+            if not hasattr(mp_main, "SklearnPipelineFactory"):
+                setattr(mp_main, "SklearnPipelineFactory", SklearnPipelineFactory)
         main_mod = sys.modules.get("__main__")
-        if main_mod is not None and not hasattr(main_mod, "HoldoutCalibratedClassifier"):
-            setattr(main_mod, "HoldoutCalibratedClassifier", HoldoutCalibratedClassifier)
+        if main_mod is not None:
+            if not hasattr(main_mod, "HoldoutCalibratedClassifier"):
+                setattr(main_mod, "HoldoutCalibratedClassifier", HoldoutCalibratedClassifier)
+            if not hasattr(main_mod, "SklearnPipelineFactory"):
+                setattr(main_mod, "SklearnPipelineFactory", SklearnPipelineFactory)
 
         pipe = joblib.load(str(PIPELINE_PATH))
     except Exception:
@@ -157,6 +177,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Churn Prediction API", version="1.0.0", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.get("/health")
 def health():
     pipe = getattr(app.state, "pipe", None)
@@ -192,7 +220,7 @@ def uplift(req: UpliftRequest):
         raise HTTPException(status_code=500, detail="Uplift model not loaded")
 
     customer_obj = req.customer
-    payload = customer_obj.model_dump() if hasattr(customer_obj, "model_dump") else customer_obj.dict()
+    payload = _asdict(customer_obj)
     df = pd.DataFrame([payload])
 
     try:
@@ -213,12 +241,18 @@ def predict(req: PredictRequest):
         logger.error("Pipeline is not loaded, cannot serve /predict")
         raise HTTPException(status_code=500, detail="Pipeline not loaded")
 
-    # pydantic v2: model_dump; pydantic v1: dict
     customer_obj = req.customer
-    payload = customer_obj.model_dump() if hasattr(customer_obj, "model_dump") else customer_obj.dict()
+    payload = _asdict(customer_obj)
     # строго один клиент
     df = pd.DataFrame([payload])
-    proba = float(pipe.predict_proba(df)[:, 1].item())
+    try:
+        proba = float(pipe.predict_proba(df)[:, 1].item())
+    except Exception:
+        logger.exception("Failed to compute churn probability")
+        raise HTTPException(status_code=500, detail="Failed to compute prediction")
+    if not math.isfinite(proba):
+        logger.error("Non-finite churn probability: %s", proba)
+        raise HTTPException(status_code=500, detail="Non-finite prediction output")
 
     # update in-memory avg proba
     try:
@@ -263,7 +297,7 @@ def drift(req: DriftRequest):
         raise HTTPException(status_code=400, detail="customers must be a non-empty list")
     rows = []
     for c in customers:
-        rows.append(c.model_dump() if hasattr(c, "model_dump") else c.dict())
+        rows.append(_asdict(c))
     df_raw = pd.DataFrame(rows)
 
     # feature-frame (align/clean/feat if possible)
@@ -325,6 +359,7 @@ def drift(req: DriftRequest):
         else:
             pred_metrics = {"rows": 0, "psi": None}
     except Exception:
+        logger.exception("Failed to compute prediction drift")
         pred_metrics = {"error": "failed_to_compute_prediction_drift"}
 
     out = {
@@ -440,18 +475,26 @@ def ab_select(req: ABSelectRequest):
 
     rows = []
     for c in customers:
-        rows.append(c.model_dump() if hasattr(c, "model_dump") else c.dict())
+        rows.append(_asdict(c))
     df = pd.DataFrame(rows)
 
     # -------- Control: churn score --------
-    churn_scores = pipe.predict_proba(df)[:, 1]
+    try:
+        churn_scores = pipe.predict_proba(df)[:, 1]
+    except Exception:
+        logger.exception("Failed to compute churn scores for A/B selection")
+        raise HTTPException(status_code=500, detail="Failed to score churn probabilities")
     churn_scores = np.asarray(churn_scores, dtype=float)
 
     order_churn = np.argsort(-churn_scores)
     control_top_k_idx = order_churn[: min(k, len(order_churn))].tolist()
 
     # -------- Treatment: uplift score --------
-    uplift_scores = uplift_pipe.predict_uplift(df)
+    try:
+        uplift_scores = uplift_pipe.predict_uplift(df)
+    except Exception:
+        logger.exception("Failed to compute uplift scores for A/B selection")
+        raise HTTPException(status_code=500, detail="Failed to score uplift")
     uplift_scores = np.asarray(uplift_scores, dtype=float)
 
     order_uplift = np.argsort(-uplift_scores)
