@@ -1,0 +1,64 @@
+{
+  "artifacts": {
+    "manifest_path": "/home/adam/projects/data-science/models/20260203_104012Z_88be4b34e96a/manifest_uplift.json",
+    "uplift_pipeline_path": "/home/adam/projects/data-science/models/20260203_104012Z_88be4b34e96a/uplift_tlearner.pkl",
+    "uplift_pipeline_sha256": "8057c99841ef5af149e2e15f3f9619cba3aee404bbc747ac1b925bc9542b17ef"
+  },
+  "code": {
+    "code_sha256": "a02a69af1f2c215c8fc9260a906d8d6c2323e0f15b0b5505b261abaef3b46ed0",
+    "per_file_sha256": {
+      "Dockerfile": "3f8af927873f6c07c70a3abef50b9a33375ae196148c1a25026f092f0bdc39dc",
+      "app/__init__.py": "3571f3ab5c8b61aa29989c30bb3e4f11752d3860a2aa69d52ec47cc8eac83b34",
+      "app/main.py": "0792e74e45781ad637d9bed28536e4844f921b44b7f0c21c648cd353ed987ff5",
+      "app/schemas.py": "d50478a2d1b9c122d9021266c0410f18a134b13dbcdf1897a72e1bd695f524b3",
+      "pyproject.toml": "34e96a3d8b12ef5d9126cbcb79ed53dd4e14aff72c75d63b9050db6bda56f743",
+      "src/__init__.py": "180b6eb9d9c9ed88c71be5cadf9c4512e5a0a3b9894f0fea168f3a73f8174661",
+      "src/calibration.py": "9b97d8763b596c7b69b692198d0304d01494f23491ee3c6605e011ae949c5076",
+      "src/config.py": "8f75fe892941789ee1dd94af9130dbc320c3627dde894c9da33bab68a230762c",
+      "src/data_loader.py": "f6e54c9aed4eb211a24d746224c9938b78f843f995867571ab228374aba4bf20",
+      "src/drift.py": "9f3ee8520aafce7771e66d76241c7223850d49b4c8b448c51def92a05526e046",
+      "src/pipeline.py": "3d4f0f69e4b34abc76cd666aece3d4883e01beb388654e4344b8c92cdf80cd9c",
+      "src/preprocessing.py": "2200ae4fdad83703b95bb5f8c81abbe52cca954eebae08817b7665a549a0b8b4",
+      "src/train_pipeline.py": "46c049ebfeff754a71636e12836b7a3a2216cd4e071e13d9dcb44f681c2dd38a",
+      "src/train_uplift.py": "587520a29d8d7fef88798251ceb181bb91643f1f5804087966f6acdfe20cb275",
+      "src/uplift.py": "c714067ce07b513683488184f5e64a62597493bda404a3c17a62f29742bd48d9",
+      "src/versioning.py": "2b03c0f6e59dc7fad02c6c7168472a9e39b6c08b75efa3e18f48dac2248a4108"
+    }
+  },
+  "created_at_utc": "2026-02-03T10:40:12.498308+00:00",
+  "data": {
+    "raw_data_path": "/home/adam/projects/data-science/data/raw/Churn.csv",
+    "raw_data_sha256": "88be4b93fbe0cc83421af1c503794c97c342eca914c1576db7c276e61d61358a"
+  },
+  "environment": {
+    "packages": {
+      "catboost": "1.2.8",
+      "fastapi": "0.128.0",
+      "joblib": "1.5.3",
+      "numpy": "2.3.5",
+      "pandas": "3.0.0",
+      "pydantic": "2.12.5",
+      "scikit-learn": "1.8.0",
+      "uvicorn": "0.40.0"
+    },
+    "platform": "Linux-6.17.0-12-generic-x86_64-with-glibc2.42",
+    "python": "3.13.7"
+  },
+  "model_version": "20260203_104012Z_88be4b34e96a",
+  "training": {
+    "metrics": {
+      "auc_control": 0.8279680693570204,
+      "auc_treated": null,
+      "control_rows": 1409,
+      "treated_rows": 0,
+      "uplift_learner": "t"
+    },
+    "random_state": 42,
+    "target": "Churn",
+    "test_rows": 1409,
+    "test_size": 0.2,
+    "train_rows": 5634,
+    "treatment_col": "treatment",
+    "uplift_learner": "t"
+  }
+}

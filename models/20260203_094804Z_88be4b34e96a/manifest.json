@@ -1,0 +1,513 @@
+{
+  "artifacts": {
+    "manifest_path": "/home/adam/projects/data-science/models/20260203_094804Z_88be4b34e96a/manifest.json",
+    "pipeline_path": "/home/adam/projects/data-science/models/20260203_094804Z_88be4b34e96a/churn_pipeline.pkl",
+    "pipeline_sha256": "82535b4ca255f236acc015af95d91285cac1c190d7f3ebcfe3bfdf696fbb23c0"
+  },
+  "code": {
+    "code_sha256": "a891491dcf759f744a5eec51952d01c18fb18d18d4592d1a099db995ab59038d",
+    "per_file_sha256": {
+      "Dockerfile": "3f8af927873f6c07c70a3abef50b9a33375ae196148c1a25026f092f0bdc39dc",
+      "app/__init__.py": "3571f3ab5c8b61aa29989c30bb3e4f11752d3860a2aa69d52ec47cc8eac83b34",
+      "app/main.py": "6a7e683b3118e7b809fb4be874a9dd81465de242ee81d7a16f58b998e9222790",
+      "app/schemas.py": "625353cb509f27a3a2bf26350b353d4ea7b8bff4aed4549fecd9f21e5fb5571d",
+      "pyproject.toml": "34e96a3d8b12ef5d9126cbcb79ed53dd4e14aff72c75d63b9050db6bda56f743",
+      "src/__init__.py": "180b6eb9d9c9ed88c71be5cadf9c4512e5a0a3b9894f0fea168f3a73f8174661",
+      "src/calibration.py": "9b97d8763b596c7b69b692198d0304d01494f23491ee3c6605e011ae949c5076",
+      "src/config.py": "8f75fe892941789ee1dd94af9130dbc320c3627dde894c9da33bab68a230762c",
+      "src/data_loader.py": "f6e54c9aed4eb211a24d746224c9938b78f843f995867571ab228374aba4bf20",
+      "src/drift.py": "9f3ee8520aafce7771e66d76241c7223850d49b4c8b448c51def92a05526e046",
+      "src/pipeline.py": "3d4f0f69e4b34abc76cd666aece3d4883e01beb388654e4344b8c92cdf80cd9c",
+      "src/preprocessing.py": "2200ae4fdad83703b95bb5f8c81abbe52cca954eebae08817b7665a549a0b8b4",
+      "src/train_pipeline.py": "46c049ebfeff754a71636e12836b7a3a2216cd4e071e13d9dcb44f681c2dd38a",
+      "src/train_uplift.py": "74a4253a301ddb30d2383ff7e01714210c44769b4bc2c16ef2c06fa4bbd3779e",
+      "src/uplift.py": "c714067ce07b513683488184f5e64a62597493bda404a3c17a62f29742bd48d9",
+      "src/versioning.py": "2b03c0f6e59dc7fad02c6c7168472a9e39b6c08b75efa3e18f48dac2248a4108"
+    }
+  },
+  "created_at_utc": "2026-02-03T09:48:04.895227+00:00",
+  "data": {
+    "profile": {
+      "columns": [
+        "customerID",
+        "gender",
+        "SeniorCitizen",
+        "Partner",
+        "Dependents",
+        "tenure",
+        "PhoneService",
+        "MultipleLines",
+        "InternetService",
+        "OnlineSecurity",
+        "OnlineBackup",
+        "DeviceProtection",
+        "TechSupport",
+        "StreamingTV",
+        "StreamingMovies",
+        "Contract",
+        "PaperlessBilling",
+        "PaymentMethod",
+        "MonthlyCharges",
+        "TotalCharges",
+        "Churn"
+      ],
+      "drift_reference": {
+        "features": {
+          "categorical": {
+            "Contract": {
+              "freq": {
+                "Month-to-month": 0.5505857294994675,
+                "One year": 0.20820021299254526,
+                "Two year": 0.24121405750798722
+              }
+            },
+            "Dependents": {
+              "freq": {
+                "No": 0.7019879304224352,
+                "Yes": 0.29801206957756476
+              }
+            },
+            "DeviceProtection": {
+              "freq": {
+                "No": 0.4387646432374867,
+                "No internet service": 0.2154774582889599,
+                "Yes": 0.3457578984735534
+              }
+            },
+            "InternetService": {
+              "freq": {
+                "DSL": 0.3438054668086617,
+                "Fiber optic": 0.44071707490237844,
+                "No": 0.2154774582889599
+              }
+            },
+            "MultipleLines": {
+              "freq": {
+                "No": 0.47657082002129925,
+                "No phone service": 0.09921902733404331,
+                "Yes": 0.42421015264465745
+              }
+            },
+            "OnlineBackup": {
+              "freq": {
+                "No": 0.4334398296059638,
+                "No internet service": 0.2154774582889599,
+                "Yes": 0.3510827121050763
+              }
+            },
+            "OnlineSecurity": {
+              "freq": {
+                "No": 0.4964501242456514,
+                "No internet service": 0.2154774582889599,
+                "Yes": 0.2880724174653887
+              }
+            },
+            "PaperlessBilling": {
+              "freq": {
+                "No": 0.40876819311324103,
+                "Yes": 0.5912318068867589
+              }
+            },
+            "Partner": {
+              "freq": {
+                "No": 0.5156194533191338,
+                "Yes": 0.48438054668086616
+              }
+            },
+            "PaymentMethod": {
+              "freq": {
+                "Bank transfer (automatic)": 0.2208022719204828,
+                "Credit card (automatic)": 0.21529996450124245,
+                "Electronic check": 0.33564075257365994,
+                "Mailed check": 0.22825701100461485
+              }
+            },
+            "PhoneService": {
+              "freq": {
+                "No": 0.09921902733404331,
+                "Yes": 0.9007809726659567
+              }
+            },
+            "StreamingMovies": {
+              "freq": {
+                "No": 0.3935037273695421,
+                "No internet service": 0.2154774582889599,
+                "Yes": 0.39101881434149804
+              }
+            },
+            "StreamingTV": {
+              "freq": {
+                "No": 0.3951011714589989,
+                "No internet service": 0.2154774582889599,
+                "Yes": 0.38942137025204115
+              }
+            },
+            "TechSupport": {
+              "freq": {
+                "No": 0.49183528576499824,
+                "No internet service": 0.2154774582889599,
+                "Yes": 0.2926872559460419
+              }
+            },
+            "gender": {
+              "freq": {
+                "Female": 0.4971600993965211,
+                "Male": 0.5028399006034788
+              }
+            }
+          },
+          "meta": {
+            "max_categories": 50,
+            "numeric_bins": 10,
+            "rows": 5634
+          },
+          "numeric": {
+            "MonthlyCharges": {
+              "edges": [
+                18.4,
+                20.05,
+                25.1,
+                45.8,
+                59.0,
+                70.5,
+                79.3,
+                85.65500000000003,
+                94.45,
+                103.05,
+                118.75
+              ],
+              "mean": 64.92996095136671,
+              "ref_bin_probs": [
+                0.09211927582534611,
+                0.10667376641817536,
+                0.1009939652112176,
+                0.09992900248491303,
+                0.10010649627263046,
+                0.09921902733404331,
+                0.1009939652112176,
+                0.0997515086971956,
+                0.09992900248491303,
+                0.10028399006034788
+              ],
+              "std": 30.135430576006627
+            },
+            "SeniorCitizen": {
+              "edges": null,
+              "mean": 0.16329428470003549,
+              "ref_bin_probs": null,
+              "std": 0.3696339558053876
+            },
+            "TotalCharges": {
+              "edges": [
+                18.85,
+                84.86000000000001,
+                271.58000000000015,
+                562.5450000000005,
+                945.9500000000004,
+                1398.125,
+                2083.07,
+                3187.65,
+                4510.02,
+                5993.934999999999,
+                8684.8
+              ],
+              "mean": 2301.3199503017395,
+              "ref_bin_probs": [
+                0.10010649627263046,
+                0.09992900248491303,
+                0.09992900248491303,
+                0.10010649627263046,
+                0.09921902733404331,
+                0.10063897763578275,
+                0.09992900248491303,
+                0.10010649627263046,
+                0.09992900248491303,
+                0.10010649627263046
+              ],
+              "std": 2277.606686938009
+            },
+            "avg_monthly_bill": {
+              "edges": [
+                9.425,
+                18.882693498452014,
+                23.15,
+                36.491666666666696,
+                49.92628260869566,
+                61.44892141756549,
+                71.85000000000001,
+                80.94327935222672,
+                90.19174968071523,
+                100.46122907153729,
+                1398.125
+              ],
+              "mean": 61.19202989323376,
+              "ref_bin_probs": [
+                0.10010649627263046,
+                0.0997515086971956,
+                0.10010649627263046,
+                0.10010649627263046,
+                0.09992900248491303,
+                0.09992900248491303,
+                0.10010649627263046,
+                0.09992900248491303,
+                0.09992900248491303,
+                0.10010649627263046
+              ],
+              "std": 58.94500549614972
+            },
+            "high_charges": {
+              "edges": null,
+              "mean": 0.49911253106141285,
+              "ref_bin_probs": null,
+              "std": 0.49999921239826267
+            },
+            "is_auto_pay": {
+              "edges": null,
+              "mean": 0.43610223642172524,
+              "ref_bin_probs": null,
+              "std": 0.49590026800728276
+            },
+            "is_long_term": {
+              "edges": null,
+              "mean": 0.5465033723819667,
+              "ref_bin_probs": null,
+              "std": 0.4978327393383285
+            },
+            "is_month_to_month": {
+              "edges": null,
+              "mean": 0.5505857294994675,
+              "ref_bin_probs": null,
+              "std": 0.49743450219200386
+            },
+            "is_new_client": {
+              "edges": null,
+              "mean": 0.29073482428115016,
+              "ref_bin_probs": null,
+              "std": 0.4541014052294475
+            },
+            "num_services": {
+              "edges": [
+                0.0,
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                5.0,
+                6.0,
+                7.0
+              ],
+              "mean": 2.9588214412495564,
+              "ref_bin_probs": [
+                0.011182108626198083,
+                0.3171813986510472,
+                0.1402200922967696,
+                0.14873979410720625,
+                0.14944976925807596,
+                0.11998580049698261,
+                0.11324103656372027
+              ],
+              "std": 1.8496201038705635
+            },
+            "revenue_per_tenure": {
+              "edges": [
+                9.425,
+                18.882693498452014,
+                23.15,
+                36.491666666666696,
+                49.92628260869566,
+                61.44892141756549,
+                71.85000000000001,
+                80.94327935222672,
+                90.19174968071523,
+                100.46122907153729,
+                1398.125
+              ],
+              "mean": 61.19202989323376,
+              "ref_bin_probs": [
+                0.10010649627263046,
+                0.0997515086971956,
+                0.10010649627263046,
+                0.10010649627263046,
+                0.09992900248491303,
+                0.09992900248491303,
+                0.10010649627263046,
+                0.09992900248491303,
+                0.09992900248491303,
+                0.10010649627263046
+              ],
+              "std": 58.94500549614972
+            },
+            "tenure": {
+              "edges": [
+                0.0,
+                2.0,
+                6.0,
+                12.0,
+                20.0,
+                29.0,
+                40.0,
+                50.0,
+                61.0,
+                69.0,
+                72.0
+              ],
+              "mean": 32.48509052183174,
+              "ref_bin_probs": [
+                0.0878594249201278,
+                0.10418885339013134,
+                0.09868654597089102,
+                0.10738374156904508,
+                0.09549165779197728,
+                0.1050763223287185,
+                0.09229676961306355,
+                0.10827121050763223,
+                0.09282925097621583,
+                0.10791622293219737
+              ],
+              "std": 24.56656301538815
+            },
+            "tenure_bucket": {
+              "edges": [
+                0.0,
+                1.0,
+                2.0,
+                3.0
+              ],
+              "mean": 1.555733049343273,
+              "ref_bin_probs": [
+                0.3083067092651757,
+                0.14518991835285766,
+                0.5465033723819667
+              ],
+              "std": 1.224165028986785
+            }
+          }
+        },
+        "prediction_proba": {
+          "edges": [
+            0.0,
+            0.012658227848101266,
+            0.038461538461538464,
+            0.05555555555555555,
+            0.1282051282051282,
+            0.18248175182481752,
+            0.3397435897435897,
+            0.3826086956521739,
+            0.5161290322580645,
+            0.6538461538461539,
+            1.0
+          ],
+          "mean": 0.2654364797728886,
+          "ref_bin_probs": [
+            0.0830376153300213,
+            0.08729595457771469,
+            0.09794180269694819,
+            0.11213626685592619,
+            0.057487579843860895,
+            0.13058907026259758,
+            0.11071682044002838,
+            0.10290986515259049,
+            0.10149041873669269,
+            0.11639460610361958
+          ],
+          "std": 0.24284983166098398
+        }
+      },
+      "missing_rate": {
+        "Churn": 0.0,
+        "Contract": 0.0,
+        "Dependents": 0.0,
+        "DeviceProtection": 0.0,
+        "InternetService": 0.0,
+        "MonthlyCharges": 0.0,
+        "MultipleLines": 0.0,
+        "OnlineBackup": 0.0,
+        "OnlineSecurity": 0.0,
+        "PaperlessBilling": 0.0,
+        "Partner": 0.0,
+        "PaymentMethod": 0.0,
+        "PhoneService": 0.0,
+        "SeniorCitizen": 0.0,
+        "StreamingMovies": 0.0,
+        "StreamingTV": 0.0,
+        "TechSupport": 0.0,
+        "TotalCharges": 0.0,
+        "customerID": 0.0,
+        "gender": 0.0,
+        "tenure": 0.0
+      },
+      "rows": 7043,
+      "target_rate": 0.2653698707936959
+    },
+    "raw_data_path": "/home/adam/projects/data-science/data/raw/Churn.csv",
+    "raw_data_sha256": "88be4b93fbe0cc83421af1c503794c97c342eca914c1576db7c276e61d61358a"
+  },
+  "environment": {
+    "packages": {
+      "catboost": "1.2.8",
+      "fastapi": "0.128.0",
+      "joblib": "1.5.3",
+      "numpy": "2.3.5",
+      "pandas": "3.0.0",
+      "pydantic": "2.12.5",
+      "scikit-learn": "1.8.0",
+      "uvicorn": "0.40.0"
+    },
+    "platform": "Linux-6.17.0-12-generic-x86_64-with-glibc2.42",
+    "python": "3.13.7"
+  },
+  "model_version": "20260203_094804Z_88be4b34e96a",
+  "training": {
+    "cost_action": 50.0,
+    "ev_at_k": [
+      {
+        "cutoff": 0.8571428571428571,
+        "ev_per_customer": 898.9795918367346,
+        "ev_total": 12585.714285714284,
+        "k": 14
+      },
+      {
+        "cutoff": 0.7538461538461538,
+        "ev_per_customer": 749.1208791208793,
+        "ev_total": 52438.46153846155,
+        "k": 70
+      },
+      {
+        "cutoff": 0.6538461538461539,
+        "ev_per_customer": 695.054945054945,
+        "ev_total": 97307.69230769231,
+        "k": 140
+      }
+    ],
+    "expected_uplift": 313450.0,
+    "ltv_saved": 1000.0,
+    "random_state": 42,
+    "retention_simulation_at_k": [
+      {
+        "k": 14,
+        "n": 1409,
+        "profit_mean": 12300.0,
+        "profit_std": 0.0
+      },
+      {
+        "k": 70,
+        "n": 1409,
+        "profit_mean": 55500.0,
+        "profit_std": 0.0
+      },
+      {
+        "k": 140,
+        "n": 1409,
+        "profit_mean": 98000.0,
+        "profit_std": 0.0
+      }
+    ],
+    "retention_uplift": 1.0,
+    "selected_threshold": 0.05,
+    "target": "Churn",
+    "test_size": 0.2,
+    "test_size_rows": 1409,
+    "threshold_config": 0.5,
+    "train_size": 5634
+  }
+}
